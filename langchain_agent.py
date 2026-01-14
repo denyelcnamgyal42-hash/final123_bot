@@ -1,0 +1,290 @@
+"""
+LangChain agent for WhatsApp hotel booking chatbot.
+"""
+import logging
+from typing import Optional
+from langchain_openai import ChatOpenAI
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
+from langchain_tools import parse_date, check_room_availability, check_room_availability_range, create_booking_request, check_booking_status
+from session_manager import session_manager
+import config
+
+logger = logging.getLogger(__name__)
+
+# Try to import agent creation functions - handle different LangChain versions
+AGENT_AVAILABLE = False
+create_agent_func = None
+AgentExecutor = None
+
+# Try multiple import strategies
+import_strategies = [
+    # Strategy 1: Standard OpenAI tools agent
+    ("langchain.agents", ["create_openai_tools_agent", "AgentExecutor"]),
+    # Strategy 2: Tool calling agent (newer)
+    ("langchain.agents", ["create_tool_calling_agent", "AgentExecutor"]),
+    # Strategy 3: Structured chat agent
+    ("langchain.agents", ["create_structured_chat_agent", "AgentExecutor"]),
+]
+
+for module_path, func_names in import_strategies:
+    try:
+        module = __import__(module_path, fromlist=func_names)
+        create_agent_func = getattr(module, func_names[0], None)
+        AgentExecutor = getattr(module, func_names[1], None)
+        if create_agent_func and AgentExecutor:
+            AGENT_AVAILABLE = True
+            logger.info(f"Successfully imported {func_names[0]} from {module_path}")
+            break
+    except (ImportError, AttributeError):
+        continue
+
+if not AGENT_AVAILABLE:
+    logger.error("Could not import agent creation functions. Trying alternative approach...")
+
+
+# System prompt for the chatbot
+SYSTEM_PROMPT = """You are a helpful hotel booking assistant for a WhatsApp chatbot.
+
+Your primary responsibilities:
+1. Answer questions about room availability for specific dates
+2. Help customers create booking requests (not confirmed bookings)
+3. Provide friendly, professional customer service
+
+CRITICAL RULES:
+
+DATE PARSING:
+- Users may provide dates in various formats (e.g., "21 January", "tomorrow", "27", "next Friday")
+- ALWAYS use the parse_date tool first to normalize dates to YYYY-MM-DD format
+- If a date is ambiguous or cannot be parsed, ask ONE clarification question
+- If a date has already passed, inform the user politely
+
+AVAILABILITY CHECKING:
+- Use check_room_availability tool with normalized YYYY-MM-DD dates for SINGLE DATE checks
+- CRITICAL: If customer mentions staying for MULTIPLE NIGHTS (e.g., "2 nights", "3 nights", "until [date]"), use check_room_availability_range tool instead
+- The range tool checks if rooms are available for ALL nights in the stay - this is important because a room might be available on check-in but booked on the next night
+- Example scenarios:
+  * Customer: "availability on 25 jan for twin room" → Use check_room_availability (single date)
+  * Customer: "availability on 25 jan for twin room, staying 2 nights" → Use check_room_availability_range (check-in: 2025-01-25, check-out: 2025-01-27, room_type: "Twin", num_rooms: 1)
+  * Customer: "I want to stay for 2 nights" (after you showed availability for one date) → Use check_room_availability_range to verify availability for the full stay
+- The tool returns room type information - ALWAYS share this COMPLETELY with customers
+- When rooms are available, tell customers EXACTLY which room types are available with counts
+- Example: "Available: 2 Twin rooms." (not "2 Twin rooms along with several other rooms")
+- NEVER mention room numbers or guest counts to customers
+- Use the status_message from the tool - it already includes room type information
+- If customer asks "which rooms?" or "show me all available rooms", use check_room_availability and show ALL available room types clearly
+- Be specific and complete - don't say "along with several other rooms", list them all
+- If availability check fails or system is unavailable:
+  * Apologize politely
+  * Offer to help them make a booking request instead
+  * Explain that staff will check availability and contact them
+  * Be helpful and suggest alternatives
+
+BOOKING REQUESTS:
+- When a customer wants to book, collect these details in order:
+  1. Check-in date (normalized to YYYY-MM-DD) - you may already have this
+  2. Check-out date (normalized to YYYY-MM-DD)
+  3. Room type preference (Twin, Double, Two Bedroom Villa, etc.) - ask which type they prefer from available options
+  4. Number of rooms required
+  5. Number of guests - CRITICAL: ALWAYS ask for this if not provided, even if you have all other details
+  6. Full name
+  7. Phone number (you may already have this from the session)
+- CRITICAL: Ask ONLY ONE question at a time. Do NOT ask multiple questions in a single response. This prevents overwhelming the user.
+- CRITICAL: Pay attention to the conversation history! If the customer has already mentioned:
+  * A room type (e.g., "I want a Double room", "one double room", "Double please", "yes those twin rooms", "yes twin", "twin rooms", "book both the rooms" when only one type is available), use that - DO NOT ask again
+  * A check-in date, use that - DO NOT ask again
+  * Number of rooms, use that - DO NOT ask again
+  * Number of guests, use that - DO NOT ask again
+- ROOM TYPE RECOGNITION - CRITICAL RULES:
+  * If you just told the customer "Available: 2 Twin rooms" and they respond with:
+    - "yes, book both" → They want Twin rooms (the only type available) - DO NOT ask which type
+    - "book both the rooms" → They want Twin rooms (the only type available) - DO NOT ask which type
+    - "yes those twin rooms" → They explicitly said Twin rooms - DO NOT ask which type
+    - "yes twin" or "twin please" → They want Twin rooms - DO NOT ask which type
+  * When only ONE room type is available and customer says "yes", "book both", "book them", "book those", they are confirming that available type
+  * Extract room type from phrases like "yes those [room type]", "book both [room type]", "[room type] please"
+  * DO NOT ask "which room type?" if the customer has already confirmed or if only one type is available
+  * If customer says "book both" when you showed "Available: 2 Twin rooms", they mean Twin rooms - proceed immediately
+- BOOKING SUMMARY AND CONFIRMATION - CRITICAL WORKFLOW:
+  * BEFORE calling create_booking_request, you MUST:
+    1. Show a complete booking summary with ALL details:
+       - Check-in date
+       - Check-out date
+       - Number of nights
+       - Room type
+       - Number of rooms
+       - Number of guests
+       - Customer name
+    2. Ask for confirmation: "Please confirm if this is correct, and I'll submit your booking request."
+    3. ONLY call create_booking_request AFTER the customer confirms (e.g., "yes", "confirm", "correct", "that's right")
+  * Example summary format: "Booking Summary:\n- Check-in: [date]\n- Check-out: [date]\n- Nights: [number]\n- Room type: [type]\n- Rooms: [number]\n- Guests: [number]\n- Name: [name]\n\nPlease confirm if this is correct, and I'll submit your booking request."
+- WORKFLOW: When customer says "book" or "yes" after you've shown availability:
+  1. Extract room type from their response OR use the only available type if they didn't specify
+  2. Check if you have ALL required information: check-in, check-out, room type, num_rooms, num_guests, name, phone
+  3. If missing num_guests → Ask for number of guests (ONE question only)
+  4. If you have ALL information → Show booking summary and ask for confirmation
+  5. Do NOT call create_booking_request until customer confirms the summary
+  6. Do NOT ask "which room type?" if they've already indicated or if only one type is available
+- Show available room types from the availability check and let them choose (only if they haven't already chosen)
+- BOOKING LIMITS:
+  * Maximum 3 rooms per booking through the chatbot
+  * If customer requests MORE than 3 rooms (e.g., "book all rooms", "book all of these rooms", "book 5 rooms", "book 8 rooms"), immediately provide the contact phone number and explain they need to call for group bookings
+  * When providing contact info, use this format: "For bookings with more than 3 rooms, please call us directly at [phone number from context] to speak with our staff. This helps us better assist travel agencies and group bookings."
+  * Room capacity limits: Each room type has a maximum guest capacity (Double: 2, Twin: 2, Two Bedroom Villa: 4)
+  * If customer requests more guests than allowed for their selected room type, inform them of the limit and suggest alternatives
+- Use create_booking_request tool to submit the request, including the room_type_preference parameter
+- If the tool returns an error about too many rooms or too many guests, explain the limitation clearly to the customer
+- If customer doesn't specify a room type preference, you can still create the request without it (pass empty string)
+- Emphasize that this is a REQUEST, not a confirmed booking
+- Tell the customer that hotel staff will contact them to confirm payment and finalize the booking
+- Provide the booking ID to the customer
+
+CONVERSATION STYLE:
+- Be friendly, professional, and concise
+- Keep responses short (WhatsApp-friendly)
+- Use natural language, not robotic responses
+- If you don't understand something, ask for clarification politely
+- Never guess availability or make up information
+
+ERROR HANDLING:
+- If a tool fails, inform the user that the system is temporarily unavailable
+- Never hallucinate or guess information
+- Always be honest about what you can and cannot do
+
+Remember: You only create booking REQUESTS. Actual bookings are confirmed by hotel staff after payment verification."""
+
+
+class WhatsAppAgent:
+    """LangChain agent for processing WhatsApp messages."""
+    
+    def __init__(self):
+        """Initialize the agent with tools and LLM."""
+        if not config.OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is required in config")
+        
+        self.llm = ChatOpenAI(
+            model=config.MODEL_NAME,
+            temperature=0.3,
+            api_key=config.OPENAI_API_KEY
+        )
+        
+        # Define tools
+        self.tools = [
+            parse_date,
+            check_room_availability,
+            check_room_availability_range,
+            create_booking_request,
+            check_booking_status
+        ]
+        
+        # Create prompt template
+        self.prompt = ChatPromptTemplate.from_messages([
+            ("system", SYSTEM_PROMPT),
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("human", "{input}"),
+            MessagesPlaceholder(variable_name="agent_scratchpad")
+        ])
+        
+        # Create agent executor
+        self.agent_executor = None
+        
+        if AGENT_AVAILABLE and create_agent_func and AgentExecutor:
+            try:
+                # Create agent using the available function
+                agent = create_agent_func(
+                    llm=self.llm,
+                    tools=self.tools,
+                    prompt=self.prompt
+                )
+                
+                # Create agent executor
+                self.agent_executor = AgentExecutor(
+                    agent=agent,
+                    tools=self.tools,
+                    verbose=config.DEBUG,
+                    max_iterations=config.MAX_ITERATIONS,
+                    handle_parsing_errors=True,
+                    return_intermediate_steps=False
+                )
+                logger.info("WhatsApp agent initialized with AgentExecutor")
+            except Exception as e:
+                logger.error(f"Failed to create agent executor: {e}", exc_info=True)
+                raise RuntimeError(f"Failed to initialize agent: {e}")
+        else:
+            raise ImportError(
+                "Could not import required LangChain agent functions. "
+                "Please install/upgrade LangChain: "
+                "pip install --upgrade 'langchain>=0.1.0' 'langchain-openai>=0.0.5'"
+            )
+    
+    def process_message(self, message: str, phone_number: str, customer_name: str = "Customer") -> str:
+        """
+        Process a WhatsApp message and return a response.
+        
+        Args:
+            message: The user's message
+            phone_number: User's phone number
+            customer_name: User's name (if available)
+            
+        Returns:
+            Response message to send to user
+        """
+        try:
+            # Get or create session
+            session = session_manager.get_session(phone_number)
+            
+            # Add user message to history
+            session.add_message("user", message)
+            
+            # Get conversation history (last 10 messages for better context)
+            chat_history = []
+            recent_messages = session.history[-10:] if len(session.history) > 1 else []
+            
+            # Convert to LangChain message format (skip the current message)
+            for msg in recent_messages[:-1]:  # Exclude the current message
+                if msg.role == "user":
+                    chat_history.append(HumanMessage(content=msg.content))
+                elif msg.role == "assistant":
+                    chat_history.append(AIMessage(content=msg.content))
+            
+            # Prepare input with context
+            # Include contact phone number in context if available
+            contact_info = f"\nContact phone for group bookings (more than 3 rooms): {config.CONTACT_PHONE_NUMBER}" if config.CONTACT_PHONE_NUMBER else ""
+            input_text = f"Customer name: {customer_name}\nPhone: {phone_number}{contact_info}\n\nMessage: {message}"
+            
+            # Run agent
+            result = self.agent_executor.invoke({
+                "input": input_text,
+                "chat_history": chat_history
+            })
+            
+            response = result.get("output", "I apologize, but I encountered an error. Please try again.")
+            
+            # Add assistant response to history
+            session.add_message("assistant", response)
+            session_manager.update_session(phone_number, session)
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error processing message: {e}", exc_info=True)
+            return "I apologize, but I encountered an error. Please try again."
+
+
+# Create global agent instance (will be initialized on startup)
+whatsapp_agent = None
+
+def initialize_agent():
+    """Initialize the agent (called on startup)."""
+    global whatsapp_agent
+    try:
+        whatsapp_agent = WhatsAppAgent()
+        logger.info("✅ WhatsApp agent initialized successfully")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize WhatsApp agent: {e}", exc_info=True)
+        return False
+
+def get_agent():
+    """Get the initialized agent instance."""
+    return whatsapp_agent

@@ -1,0 +1,1325 @@
+"""
+Excel and Google Sheets handler for reading and updating room availability.
+Maintains the fixed structure: Rows = dates, Columns = rooms.
+"""
+import os
+import logging
+import time
+from typing import Optional, Dict, List, Tuple
+from datetime import datetime, timedelta
+import json
+
+logger = logging.getLogger(__name__)
+
+# Try to import required libraries
+try:
+    import openpyxl
+    from openpyxl import load_workbook, Workbook
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+    logger.warning("openpyxl not available. Excel functionality will be limited.")
+
+try:
+    import gspread
+    from gspread import exceptions as gspread_exceptions
+    from gspread.exceptions import WorksheetNotFound
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
+    gspread_exceptions = None
+    WorksheetNotFound = None
+    logger.warning("gspread not available. Google Sheets functionality will be limited.")
+
+
+class ExcelHandler:
+    """Handles reading and writing to Excel/Google Sheets for room availability."""
+    
+    def __init__(self, excel_path: Optional[str] = None, 
+                 google_sheet_id: Optional[str] = None,
+                 google_credentials_path: Optional[str] = None,
+                 sheet_name: str = "Sheet1"):
+        """
+        Initialize Excel handler.
+        
+        Args:
+            excel_path: Path to local Excel file
+            google_sheet_id: Google Sheet ID (if using Google Sheets)
+            google_credentials_path: Path to Google credentials JSON
+            sheet_name: Name of the sheet to use
+        """
+        self.excel_path = excel_path
+        self.google_sheet_id = google_sheet_id
+        self.google_credentials_path = google_credentials_path
+        self.sheet_name = sheet_name
+        self.use_google_sheets = google_sheet_id is not None
+        
+        # Connection state tracking for Google Sheets
+        self._initialized = False
+        self._last_connection_attempt = 0
+        self._connection_cooldown = 60  # 60 seconds cooldown between connection attempts
+        self._client = None
+        self._spreadsheet = None
+        
+        if self.use_google_sheets:
+            self._init_google_sheets()
+        elif excel_path:
+            self._init_excel()
+    
+    def _get_service_account_email(self) -> str:
+        """Get service account email from credentials file."""
+        try:
+            with open(self.google_credentials_path, 'r') as f:
+                creds_data = json.load(f)
+                return creds_data.get('client_email', 'Not found')
+        except Exception:
+            return 'Not found'
+    
+    def _ensure_connected(self, force_reconnect: bool = False):
+        """Ensure connection to Google Sheets is established."""
+        current_time = time.time()
+        
+        # Check if we should attempt reconnection
+        if (not force_reconnect and 
+            self._initialized and 
+            (current_time - self._last_connection_attempt) < self._connection_cooldown):
+            return
+        
+        self._last_connection_attempt = current_time
+        
+        try:
+            # Check if credentials file exists
+            if not os.path.exists(self.google_credentials_path):
+                raise FileNotFoundError(
+                    f"Google Sheets credentials file not found: {self.google_credentials_path}"
+                )
+            
+            # Check if sheet ID is configured
+            if not self.google_sheet_id:
+                raise ValueError("GOOGLE_SHEET_ID is not set in your .env file")
+            
+            # Configure scopes
+            scope = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive.file"
+            ]
+            
+            # Load credentials
+            creds = Credentials.from_service_account_file(
+                self.google_credentials_path, 
+                scopes=scope
+            )
+            
+            # Create client
+            self._client = gspread.authorize(creds)
+            
+            # Open spreadsheet
+            self._spreadsheet = self._client.open_by_key(self.google_sheet_id)
+            
+            # Test connection
+            _ = self._spreadsheet.title  # This will raise if connection fails
+            
+            self._initialized = True
+            logger.info(f"✅ Connected to Google Sheet: {self._spreadsheet.title}")
+            
+        except gspread.exceptions.SpreadsheetNotFound:
+            service_email = self._get_service_account_email()
+            error_msg = (
+                f"❌ Google Sheet with ID '{self.google_sheet_id}' not found.\n"
+                f"Please check:\n"
+                f"1. Sheet ID is correct in your .env file\n"
+                f"2. Sheet is shared with service account email: {service_email}\n"
+                f"3. Service account has 'Editor' or 'Viewer' permissions"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+        except Exception as e:
+            service_email = self._get_service_account_email()
+            error_msg = f"❌ Failed to connect to Google Sheets: {str(e)}\nService account: {service_email}"
+            logger.error(error_msg)
+            import traceback
+            traceback.print_exc()
+            raise RuntimeError(error_msg)
+    
+    def _init_google_sheets(self):
+        """Initialize Google Sheets connection."""
+        if not GSPREAD_AVAILABLE:
+            raise ImportError("gspread is required for Google Sheets support. Install with: pip install gspread google-auth")
+        
+        # Establish connection
+        logger.info("🔗 Establishing connection to Google Sheets...")
+        self._ensure_connected(force_reconnect=True)
+        
+        # List all available worksheets for debugging
+        try:
+            all_worksheets = [ws.title for ws in self._spreadsheet.worksheets()]
+            logger.info(f"📋 Available worksheets in '{self._spreadsheet.title}': {', '.join(all_worksheets)}")
+            
+            # Check if worksheet exists (with or without trailing spaces)
+            worksheet_found = None
+            for ws in self._spreadsheet.worksheets():
+                if ws.title.strip() == self.sheet_name.strip():
+                    worksheet_found = ws
+                    if ws.title != self.sheet_name:
+                        logger.info(f"ℹ️  Found worksheet '{ws.title}' (matches '{self.sheet_name}' after trimming spaces)")
+                    break
+        except Exception as e:
+            logger.warning(f"Could not list worksheets: {e}")
+            worksheet_found = None
+        
+        # Try to get the worksheet, create if it doesn't exist
+        if worksheet_found:
+            self.sheet = worksheet_found
+            logger.info(f"✅ Connected to worksheet '{self.sheet.title}' in Google Sheet '{self._spreadsheet.title}'")
+        else:
+            try:
+                self.sheet = self._spreadsheet.worksheet(self.sheet_name)
+                logger.info(f"✅ Connected to worksheet '{self.sheet_name}' in Google Sheet '{self._spreadsheet.title}'")
+            except WorksheetNotFound:
+                # Worksheet doesn't exist, create it
+                logger.warning(f"⚠️ Worksheet '{self.sheet_name}' not found in the Google Sheet.")
+                logger.info(f"📝 Attempting to create worksheet '{self.sheet_name}'...")
+                try:
+                    self.sheet = self._spreadsheet.add_worksheet(title=self.sheet_name, rows=100, cols=20)
+                    # Set header row using correct update syntax (must be 2D array)
+                    self.sheet.update('A1', [['Date']])
+                    self.sheet.update('B1', [['Room 1']])
+                    self.sheet.update('C1', [['Room 2']])
+                    logger.info(f"✅ Created new worksheet '{self.sheet_name}' in Google Sheet '{self._spreadsheet.title}'")
+                    logger.info("📋 Worksheet structure initialized with headers: Date, Room 1, Room 2")
+                except Exception as create_error:
+                    service_email = self._get_service_account_email()
+                    error_msg = (
+                        f"❌ Failed to create worksheet '{self.sheet_name}': {str(create_error)}\n"
+                        f"Make sure the service account ({service_email}) has 'Editor' permissions on the Google Sheet."
+                    )
+                    logger.error(error_msg)
+                    raise RuntimeError(error_msg)
+            except Exception as ws_error:
+                error_str = str(ws_error).lower()
+                # Check if it's a worksheet not found error (fallback for different exception types)
+                if "worksheet" in error_str or "not found" in error_str or "does not exist" in error_str:
+                    logger.warning(f"⚠️ Worksheet '{self.sheet_name}' not found in the Google Sheet.")
+                    logger.info(f"📝 Attempting to create worksheet '{self.sheet_name}'...")
+                    try:
+                        self.sheet = self._spreadsheet.add_worksheet(title=self.sheet_name, rows=100, cols=20)
+                        # Set header row using correct update syntax
+                        self.sheet.update('A1', [['Date']])
+                        self.sheet.update('B1', [['Room 1']])
+                        self.sheet.update('C1', [['Room 2']])
+                        logger.info(f"✅ Created new worksheet '{self.sheet_name}' in Google Sheet '{self._spreadsheet.title}'")
+                        logger.info("📋 Worksheet structure initialized with headers: Date, Room 1, Room 2")
+                    except Exception as create_error:
+                        service_email = self._get_service_account_email()
+                        error_msg = (
+                            f"❌ Failed to create worksheet '{self.sheet_name}': {str(create_error)}\n"
+                            f"Make sure the service account ({service_email}) has 'Editor' permissions on the Google Sheet."
+                        )
+                        logger.error(error_msg)
+                        raise RuntimeError(error_msg)
+                else:
+                    logger.error(f"❌ Error accessing worksheet: {ws_error}")
+                    raise
+    
+    def _init_excel(self):
+        """Initialize Excel file connection."""
+        if not OPENPYXL_AVAILABLE:
+            raise ImportError("openpyxl is required for Excel support. Install with: pip install openpyxl")
+        
+        if not os.path.exists(self.excel_path):
+            logger.warning(f"Excel file not found: {self.excel_path}. Creating new file.")
+            self._create_new_excel()
+        else:
+            try:
+                self.workbook = load_workbook(self.excel_path, data_only=True)
+                if self.sheet_name in self.workbook.sheetnames:
+                    self.worksheet = self.workbook[self.sheet_name]
+                    logger.info(f"Loaded Excel file: {self.excel_path} with sheet '{self.sheet_name}'")
+                else:
+                    logger.warning(f"Sheet '{self.sheet_name}' not found in {self.excel_path}. Creating new sheet...")
+                    # Create the sheet if it doesn't exist
+                    self.worksheet = self.workbook.create_sheet(self.sheet_name)
+                    # Set header row
+                    self.worksheet['A1'] = 'Date'
+                    self.worksheet['B1'] = 'Room 1'
+                    self.worksheet['C1'] = 'Room 2'
+                    self.workbook.save(self.excel_path)
+                    logger.info(f"Created new sheet '{self.sheet_name}' in Excel file")
+            except Exception as e:
+                error_msg = f"Failed to load Excel file {self.excel_path}: {str(e)}"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+    
+    def _create_new_excel(self):
+        """Create a new Excel file with basic structure."""
+        self.workbook = Workbook()
+        self.worksheet = self.workbook.active
+        self.worksheet.title = self.sheet_name
+        # Set header row: Date in A1, Room columns start from B1
+        self.worksheet['A1'] = 'Date'
+        self.worksheet['B1'] = 'Room 1'
+        self.worksheet['C1'] = 'Room 2'
+        self.workbook.save(self.excel_path)
+        logger.info(f"Created new Excel file: {self.excel_path}")
+    
+    def find_date_row(self, date_str: str) -> Optional[int]:
+        """
+        Find the row number for a given date (YYYY-MM-DD format).
+        
+        Args:
+            date_str: Date in YYYY-MM-DD format
+            
+        Returns:
+            Row number (1-indexed) or None if not found
+        """
+        if self.use_google_sheets:
+            return self._find_date_row_google(date_str)
+        else:
+            return self._find_date_row_excel(date_str)
+    
+    def _find_date_row_excel(self, date_str: str) -> Optional[int]:
+        """Find date row in Excel file."""
+        try:
+            # Parse the date
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+            target_month = date_obj.month
+            target_day = date_obj.day
+            
+            # Check all rows in column A (date column), skip header rows 1-3
+            for row_idx in range(4, self.worksheet.max_row + 1):
+                cell_value = self.worksheet.cell(row=row_idx, column=1).value
+                
+                if cell_value is None:
+                    continue
+                
+                # Try to match date in various formats
+                if isinstance(cell_value, datetime):
+                    # Match by month and day (ignore year)
+                    if cell_value.month == target_month and cell_value.day == target_day:
+                        return row_idx
+                elif isinstance(cell_value, str):
+                    cell_str = str(cell_value).strip().lower()
+                    
+                    # Try parsing formats like "January 15", "January 15, 2025", etc.
+                    try:
+                        import re
+                        # Remove year if present
+                        date_clean = re.sub(r',\s*\d{4}', '', cell_str)
+                        
+                        # Parse month name and day
+                        month_names = {
+                            'january': 1, 'jan': 1, 'february': 2, 'feb': 2,
+                            'march': 3, 'mar': 3, 'april': 4, 'apr': 4,
+                            'may': 5, 'june': 6, 'jun': 6, 'july': 7, 'jul': 7,
+                            'august': 8, 'aug': 8, 'september': 9, 'sep': 9, 'sept': 9,
+                            'october': 10, 'oct': 10, 'november': 11, 'nov': 11,
+                            'december': 12, 'dec': 12
+                        }
+                        
+                        for month_name, month_num in month_names.items():
+                            if month_name in date_clean:
+                                day_match = re.search(r'\b(\d{1,2})\b', date_clean)
+                                if day_match:
+                                    day_num = int(day_match.group(1))
+                                    if month_num == target_month and day_num == target_day:
+                                        return row_idx
+                    except Exception:
+                        pass
+                    
+                    # Try standard date formats
+                    for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y', '%Y/%m/%d', '%B %d', '%B %d, %Y', '%b %d', '%b %d, %Y']:
+                        try:
+                            parsed = datetime.strptime(cell_value, fmt)
+                            # Match by month and day (ignore year)
+                            if parsed.month == target_month and parsed.day == target_day:
+                                return row_idx
+                        except ValueError:
+                            continue
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error finding date row: {e}")
+            return None
+    
+    def _find_date_row_google(self, date_str: str) -> Optional[int]:
+        """Find date row in Google Sheet."""
+        try:
+            # Ensure connection is established
+            self._ensure_connected()
+            
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+            target_month = date_obj.month
+            target_day = date_obj.day
+            
+            # Get all dates from column A (skip header rows 1-3)
+            dates = self.sheet.col_values(1)
+            
+            logger.debug(f"Looking for date: {date_str} (month={target_month}, day={target_day})")
+            logger.debug(f"Found {len(dates)} rows in column A")
+            
+            # Try to find the date, handling various formats
+            for idx, date_val in enumerate(dates, start=1):
+                if idx <= 3:  # Skip header rows
+                    continue
+                    
+                if not date_val:
+                    continue
+                
+                date_str_lower = str(date_val).strip().lower()
+                logger.debug(f"Row {idx}: Checking date value '{date_val}'")
+                
+                # Try parsing formats like "January 15", "January 15, 2025", etc.
+                try:
+                    # Format: "January 15" or "January 15, 2025"
+                    import re
+                    # Remove year if present, we'll match by month and day
+                    date_clean = re.sub(r',\s*\d{4}', '', date_str_lower)
+                    
+                    # Parse month name and day
+                    month_names = {
+                        'january': 1, 'jan': 1, 'february': 2, 'feb': 2,
+                        'march': 3, 'mar': 3, 'april': 4, 'apr': 4,
+                        'may': 5, 'june': 6, 'jun': 6, 'july': 7, 'jul': 7,
+                        'august': 8, 'aug': 8, 'september': 9, 'sep': 9, 'sept': 9,
+                        'october': 10, 'oct': 10, 'november': 11, 'nov': 11,
+                        'december': 12, 'dec': 12
+                    }
+                    
+                    # Try to extract month and day
+                    for month_name, month_num in month_names.items():
+                        if month_name in date_clean:
+                            # Extract day number
+                            day_match = re.search(r'\b(\d{1,2})\b', date_clean)
+                            if day_match:
+                                day_num = int(day_match.group(1))
+                                # Match if month and day match (ignore year)
+                                if month_num == target_month and day_num == target_day:
+                                    logger.info(f"✅ Found date match at row {idx}: '{date_val}' matches {date_str}")
+                                    return idx
+                except Exception:
+                    pass
+                
+                # Try standard date formats
+                for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y', '%Y/%m/%d', '%B %d', '%B %d, %Y', '%b %d', '%b %d, %Y']:
+                    try:
+                        parsed = datetime.strptime(str(date_val), fmt)
+                        # Match by month and day (ignore year)
+                        if parsed.month == target_month and parsed.day == target_day:
+                            return idx
+                    except (ValueError, TypeError):
+                        continue
+            
+            return None
+        except Exception as e:
+            logger.error(f"Error finding date row in Google Sheets: {e}")
+            return None
+    
+    def check_availability(self, date_str: str, room_type: Optional[str] = None) -> Tuple[bool, Optional[str], int, Dict[str, int]]:
+        """
+        Check room availability for a given date.
+        
+        Args:
+            date_str: Date in YYYY-MM-DD format
+            room_type: Optional room type to check (e.g., "Twin", "Double"). If provided, only checks availability for that type.
+            
+        Returns:
+            Tuple of (is_available, status_message, available_count, room_types_dict)
+            is_available: True if at least one room is available (or at least one of the requested type)
+            status_message: Human-readable status
+            available_count: Number of available rooms (or available rooms of requested type)
+            room_types_dict: Dictionary mapping room types to available counts (e.g., {"Twin": 2, "Double": 1})
+        """
+        row_num = self.find_date_row(date_str)
+        
+        if row_num is None:
+            return False, "Availability cannot be checked for that date.", 0, {}
+        
+        try:
+            if self.use_google_sheets:
+                is_available, status_message, available_count, room_types_dict = self._check_availability_google(row_num)
+            else:
+                is_available, status_message, available_count, room_types_dict = self._check_availability_excel(row_num)
+            
+            # If a specific room type was requested, filter the results
+            if room_type:
+                room_type_normalized = room_type.strip().lower()
+                requested_type_available = 0
+                
+                # Find matching room type (case-insensitive)
+                for rtype, count in room_types_dict.items():
+                    if rtype.lower() == room_type_normalized:
+                        requested_type_available = count
+                        break
+                
+                if requested_type_available > 0:
+                    return True, f"{requested_type_available} {room_type} room(s) available on that date.", requested_type_available, {room_type: requested_type_available}
+                else:
+                    # Check if any rooms of this type exist in the sheet
+                    all_room_types = set()
+                    if self.use_google_sheets:
+                        room_types_map = self._get_room_types_google()
+                    else:
+                        room_types_map = self._get_room_types_excel()
+                    for rtype in room_types_map.values():
+                        all_room_types.add(rtype.lower())
+                    
+                    if room_type_normalized in all_room_types:
+                        return False, f"Sorry, no {room_type} rooms are available on that date. Available room types: {', '.join([f'{count} {rtype}' for rtype, count in room_types_dict.items()])}.", 0, {}
+                    else:
+                        return False, f"Sorry, we don't have {room_type} rooms. Available room types: {', '.join([f'{count} {rtype}' for rtype, count in room_types_dict.items()])}.", 0, {}
+            
+            return is_available, status_message, available_count, room_types_dict
+        except Exception as e:
+            logger.error(f"Error checking availability: {e}")
+            return False, "System temporarily unavailable.", 0, {}
+    
+    def check_availability_range(self, check_in_date: str, check_out_date: str, room_type: Optional[str] = None, num_rooms: int = 1) -> Tuple[bool, Optional[str], int, Dict[str, int]]:
+        """
+        Check room availability for a date range (check-in to check-out, exclusive).
+        Only returns rooms that are available for ALL nights in the range.
+        
+        Args:
+            check_in_date: Check-in date in YYYY-MM-DD format
+            check_out_date: Check-out date in YYYY-MM-DD format
+            room_type: Optional room type to check (e.g., "Twin", "Double"). If provided, only checks availability for that type.
+            num_rooms: Number of rooms needed (default: 1)
+            
+        Returns:
+            Tuple of (is_available, status_message, available_count, room_types_dict)
+            is_available: True if at least num_rooms are available for ALL nights
+            status_message: Human-readable status
+            available_count: Number of rooms available for the full stay
+            room_types_dict: Dictionary mapping room types to available counts
+        """
+        try:
+            from datetime import datetime, timedelta
+            
+            # Parse dates
+            check_in = datetime.strptime(check_in_date, '%Y-%m-%d')
+            check_out = datetime.strptime(check_out_date, '%Y-%m-%d')
+            
+            # Generate all dates in range (check-in to check-out, exclusive)
+            current_date = check_in
+            dates_to_check = []
+            while current_date < check_out:
+                dates_to_check.append(current_date.strftime('%Y-%m-%d'))
+                current_date += timedelta(days=1)
+            
+            if not dates_to_check:
+                return False, "Invalid date range.", 0, {}
+            
+            logger.info(f"Checking availability for {len(dates_to_check)} nights: {dates_to_check}")
+            
+            # Get room types mapping
+            if self.use_google_sheets:
+                room_types_map = self._get_room_types_google()
+            else:
+                room_types_map = self._get_room_types_excel()
+            
+            # If room type is specified, filter to only that type
+            if room_type:
+                room_type_normalized = room_type.strip().lower()
+                filtered_room_types = {}
+                for col_idx, rtype in room_types_map.items():
+                    if rtype.lower() == room_type_normalized:
+                        filtered_room_types[col_idx] = rtype
+                if not filtered_room_types:
+                    # Room type doesn't exist
+                    all_types = set(rt.lower() for rt in room_types_map.values())
+                    if room_type_normalized in all_types:
+                        return False, f"Sorry, no {room_type} rooms are available for the full stay.", 0, {}
+                    else:
+                        return False, f"Sorry, we don't have {room_type} rooms.", 0, {}
+                room_types_map = filtered_room_types
+            
+            # For each room column, check if it's available on ALL dates
+            # Track which columns are available for all dates
+            available_columns_by_type = {}  # {room_type: [list of column indices]}
+            
+            for col_idx, room_type_name in room_types_map.items():
+                is_available_all_dates = True
+                
+                # Check this column for all dates
+                for date_str in dates_to_check:
+                    row_num = self.find_date_row(date_str)
+                    if row_num is None:
+                        is_available_all_dates = False
+                        break
+                    
+                    # Check if this room is available on this date
+                    try:
+                        if self.use_google_sheets:
+                            cell_value = self.sheet.cell(row_num, col_idx).value
+                        else:
+                            cell_value = self.worksheet.cell(row=row_num, column=col_idx).value
+                        
+                        # Room is occupied if cell has a value
+                        if cell_value is not None and str(cell_value).strip() != '':
+                            is_available_all_dates = False
+                            break
+                    except Exception as e:
+                        logger.debug(f"Error checking column {col_idx} for date {date_str}: {e}")
+                        is_available_all_dates = False
+                        break
+                
+                # If room is available for all dates, add it
+                if is_available_all_dates:
+                    if room_type_name not in available_columns_by_type:
+                        available_columns_by_type[room_type_name] = []
+                    available_columns_by_type[room_type_name].append(col_idx)
+            
+            # Count available rooms by type
+            room_types_dict = {rtype: len(cols) for rtype, cols in available_columns_by_type.items()}
+            total_available = sum(room_types_dict.values())
+            
+            # Check if we have enough rooms
+            is_available = total_available >= num_rooms
+            
+            # Build status message
+            if total_available == 0:
+                if room_type:
+                    status = f"Sorry, no {room_type} rooms are available for the full stay ({len(dates_to_check)} night(s))."
+                else:
+                    status = f"Sorry, no rooms are available for the full stay ({len(dates_to_check)} night(s))."
+            elif total_available < num_rooms:
+                if room_type:
+                    status = f"Sorry, only {total_available} {room_type} room(s) available for the full stay, but you need {num_rooms}."
+                else:
+                    room_list = ", ".join([f"{count} {rtype}" for rtype, count in room_types_dict.items()])
+                    status = f"Sorry, only {total_available} room(s) available for the full stay ({len(dates_to_check)} night(s)): {room_list}. You need {num_rooms} room(s)."
+            else:
+                if room_type:
+                    status = f"{total_available} {room_type} room(s) available for the full stay ({len(dates_to_check)} night(s))."
+                else:
+                    room_list = ", ".join([f"{count} {rtype}" for rtype, count in room_types_dict.items()])
+                    status = f"{total_available} room(s) available for the full stay ({len(dates_to_check)} night(s)): {room_list}."
+            
+            return is_available, status, total_available, room_types_dict
+            
+        except Exception as e:
+            logger.error(f"Error checking availability range: {e}")
+            return False, f"Error checking availability: {str(e)}", 0, {}
+    
+    def _get_room_types_excel(self) -> Dict[int, str]:
+        """
+        Get room type mapping from header rows (row 1 and row 2).
+        Dynamic approach: checks row 1 first (starting from column B), falls back to row 2 if needed.
+        Skips column A (which typically has property name) and column B in row 2 (which has "Total Rooms").
+        """
+        room_types = {}
+        try:
+            # Strategy: Check row 1 for room types starting from column B (skip column A)
+            # Also check row 2 as fallback, but skip "Total Rooms" in column B
+            # Check up to 30 columns to ensure we catch all rooms
+            max_col = max(self.worksheet.max_column + 1, 30)  # Check at least 30 columns
+            
+            # First, check row 2 column B to see if it says "Total Rooms" - this helps us identify the structure
+            try:
+                col_b_row2 = self.worksheet.cell(row=2, column=2).value
+                has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
+            except:
+                has_total_rooms_col = False
+            
+            # Start from column B (2) - skip column A which has property name
+            start_col = 2
+            # If column B in row 2 has "Total Rooms", room data starts from column C (3)
+            if has_total_rooms_col:
+                start_col = 3
+            
+            for col_idx in range(start_col, max_col):
+                try:
+                    # First, try row 1 (room type header)
+                    cell_row1 = self.worksheet.cell(row=1, column=col_idx)
+                    room_type = None
+                    
+                    if cell_row1.value:
+                        room_type = str(cell_row1.value).strip()
+                        # Skip if it's "Room X", "Total Rooms", "Date", or empty
+                        # But allow room types that contain "bedroom" or "villa" (like "Two Bedroom Villa")
+                        room_type_lower = room_type.lower()
+                        if (room_type_lower.startswith("room ") or 
+                            room_type_lower in ["", "total rooms", "date"]):
+                            room_type = None
+                        # Note: We now allow "bedroom" and "villa" in room type names
+                        # Only skip if it's clearly a generic label
+                    
+                    # If row 1 didn't have a valid room type, check row 2 (but skip "Total Rooms")
+                    if not room_type:
+                        cell_row2 = self.worksheet.cell(row=2, column=col_idx)
+                        if cell_row2.value:
+                            potential_type = str(cell_row2.value).strip()
+                            potential_lower = potential_type.lower()
+                            # If it's "Room X" format, we still want to include it as a room
+                            # but we'll use a generic name or check if there's data in the column
+                            if potential_lower.startswith("room "):
+                                # This is a room column, check if row 1 has a type or use generic
+                                if not cell_row1.value or str(cell_row1.value).strip() == "":
+                                    # No room type in row 1, use the room number as identifier
+                                    room_type = potential_type  # e.g., "Room 7", "Room 8"
+                                else:
+                                    # Row 1 has something, use it as room type
+                                    room_type = str(cell_row1.value).strip()
+                            elif potential_lower not in ["total rooms", "date"]:
+                                # Not "Room X" but also not a generic label, use it as room type
+                                room_type = potential_type
+                    
+                    # If we found a valid room type, add it
+                    if room_type and room_type:
+                        room_types[col_idx] = room_type
+                        logger.debug(f"Found room type '{room_type}' in column {col_idx}")
+                    
+                except Exception as e:
+                    # If we can't read more columns, we've reached the end
+                    logger.debug(f"Stopped reading room types at column {col_idx}: {e}")
+                    break
+            
+            # If no room types found, try a more aggressive search starting from column B
+            if not room_types:
+                logger.warning("No room types found with standard method, trying alternative approach...")
+                for col_idx in range(2, max_col):
+                    try:
+                        cell_row1 = self.worksheet.cell(row=1, column=col_idx)
+                        if cell_row1.value:
+                            val = str(cell_row1.value).strip()
+                            # Accept any non-empty value that's not a generic label
+                            # Allow room types with "bedroom" or "villa" in the name
+                            if (val and 
+                                not val.lower().startswith("room ") and
+                                val.lower() not in ["", "total rooms", "date"]):
+                                room_types[col_idx] = val
+                                logger.debug(f"Found room type '{val}' in column {col_idx} (alternative method)")
+                    except:
+                        break
+            
+            logger.info(f"Found {len(room_types)} room types: {list(room_types.values())}")
+            return room_types
+        except Exception as e:
+            logger.warning(f"Could not read room types from header: {e}")
+            return room_types
+    
+    def _check_availability_excel(self, row_num: int) -> Tuple[bool, Optional[str], int, Dict[str, int]]:
+        """Check availability in Excel file."""
+        # Get room types from header row
+        room_types = self._get_room_types_excel()
+        
+        available_count = 0
+        total_rooms = 0
+        room_type_counts = {}  # Track available rooms by type
+        
+        # More dynamic: only check columns that have room types defined
+        # This makes it resilient to sheet structure changes
+        checked_cols = set()
+        max_col = min(self.worksheet.max_column + 1, 30)  # Check up to 30 columns
+        
+        # Determine starting column - check if column B in row 2 has "Total Rooms"
+        try:
+            col_b_row2 = self.worksheet.cell(row=2, column=2).value
+            has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
+            start_col = 3 if has_total_rooms_col else 2
+        except:
+            start_col = 2
+        
+        for col_idx in range(start_col, max_col):
+            try:
+                # Check if this column has a room type defined
+                room_type = room_types.get(col_idx)
+                if not room_type:
+                    # Skip columns without room types
+                    continue
+                
+                # Avoid double-counting
+                if col_idx in checked_cols:
+                    continue
+                checked_cols.add(col_idx)
+                
+                # Check availability for this room
+                cell = self.worksheet.cell(row=row_num, column=col_idx)
+                total_rooms += 1
+                
+                # Blank or empty cell = available
+                # Numbers (1, 2, etc.) = occupied with that many guests
+                cell_value = cell.value
+                if cell_value is None or str(cell_value).strip() == '':
+                    available_count += 1
+                    room_type_counts[room_type] = room_type_counts.get(room_type, 0) + 1
+                    logger.debug(f"Column {col_idx} ({room_type}): Available")
+                else:
+                    logger.debug(f"Column {col_idx} ({room_type}): Occupied (value: {cell_value})")
+                    
+            except Exception as e:
+                # If we can't read more columns, we've reached the end
+                logger.debug(f"Stopped checking availability at column {col_idx}: {e}")
+                break
+        
+        if total_rooms == 0:
+            return False, "No rooms configured for that date.", 0, {}
+        
+        is_available = available_count > 0
+        
+        # Build status message with room types - be explicit about all available types
+        if available_count == 0:
+            status = "Sorry, rooms are sold out on that date."
+        else:
+            # Create a clear list of all available room types
+            room_type_parts = []
+            for rtype, count in sorted(room_type_counts.items()):
+                if count == 1:
+                    room_type_parts.append(f"1 {rtype} room")
+                else:
+                    room_type_parts.append(f"{count} {rtype} rooms")
+            
+            room_type_list = ", ".join(room_type_parts)
+            
+            if available_count == 1:
+                status = f"Limited availability on that date. Available: {room_type_list}."
+            else:
+                status = f"Rooms are available on that date. Available: {room_type_list}."
+        
+        return is_available, status, available_count, room_type_counts
+    
+    def _get_room_types_google(self) -> Dict[int, str]:
+        """
+        Get room type mapping from header rows (row 1 and row 2).
+        Dynamic approach: checks row 1 first (starting from column B), falls back to row 2 if needed.
+        Skips column A (which typically has property name) and column B in row 2 (which has "Total Rooms").
+        """
+        room_types = {}
+        try:
+            # Ensure connection is established
+            self._ensure_connected()
+            
+            # Strategy: Check row 1 for room types starting from column B (skip column A)
+            # Also check row 2 as fallback, but skip "Total Rooms" in column B
+            # Check up to 30 columns to ensure we catch all rooms
+            max_cols = 30  # Check at least 30 columns
+            
+            # First, check row 2 column B to see if it says "Total Rooms" - this helps us identify the structure
+            try:
+                col_b_row2 = self.sheet.cell(2, 2).value
+                has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
+            except:
+                has_total_rooms_col = False
+            
+            # Start from column B (2) - skip column A which has property name
+            start_col = 2
+            # If column B in row 2 has "Total Rooms", room data starts from column C (3)
+            if has_total_rooms_col:
+                start_col = 3
+            
+            for col_num in range(start_col, start_col + max_cols):
+                try:
+                    # First, try row 1 (room type header)
+                    cell_value_row1 = self.sheet.cell(1, col_num).value
+                    room_type = None
+                    
+                    if cell_value_row1:
+                        room_type = str(cell_value_row1).strip()
+                        # Skip if it's "Room X", "Total Rooms", "Date", or empty
+                        # But allow room types that contain "bedroom" or "villa" (like "Two Bedroom Villa")
+                        room_type_lower = room_type.lower()
+                        if (room_type_lower.startswith("room ") or 
+                            room_type_lower in ["", "total rooms", "date"]):
+                            room_type = None
+                        # Note: We now allow "bedroom" and "villa" in room type names
+                        # Only skip if it's clearly a generic label
+                    
+                    # If row 1 didn't have a valid room type, check row 2 (but skip "Total Rooms")
+                    if not room_type:
+                        cell_value_row2 = self.sheet.cell(2, col_num).value
+                        if cell_value_row2:
+                            potential_type = str(cell_value_row2).strip()
+                            potential_lower = potential_type.lower()
+                            # If it's "Room X" format, we still want to include it as a room
+                            # but we'll use a generic name or check if there's data in the column
+                            if potential_lower.startswith("room "):
+                                # This is a room column, check if row 1 has a type or use generic
+                                if not cell_value_row1 or str(cell_value_row1).strip() == "":
+                                    # No room type in row 1, use the room number as identifier
+                                    room_type = potential_type  # e.g., "Room 7", "Room 8"
+                                else:
+                                    # Row 1 has something, use it as room type
+                                    room_type = str(cell_value_row1).strip()
+                            elif potential_lower not in ["total rooms", "date"]:
+                                # Not "Room X" but also not a generic label, use it as room type
+                                room_type = potential_type
+                    
+                    # If we found a valid room type, add it
+                    if room_type and room_type:
+                        room_types[col_num] = room_type
+                        logger.debug(f"Found room type '{room_type}' in column {col_num}")
+                    
+                except Exception as e:
+                    # If we can't read more columns, we've reached the end
+                    logger.debug(f"Stopped reading room types at column {col_num}: {e}")
+                    break
+            
+            # If no room types found, try a more aggressive search starting from column B
+            if not room_types:
+                logger.warning("No room types found with standard method, trying alternative approach...")
+                for col_num in range(2, 2 + max_cols):
+                    try:
+                        cell_value_row1 = self.sheet.cell(1, col_num).value
+                        if cell_value_row1:
+                            val = str(cell_value_row1).strip()
+                            # Accept any non-empty value that's not a generic label
+                            # Allow room types with "bedroom" or "villa" in the name
+                            if (val and 
+                                not val.lower().startswith("room ") and
+                                val.lower() not in ["", "total rooms", "date"]):
+                                room_types[col_num] = val
+                                logger.debug(f"Found room type '{val}' in column {col_num} (alternative method)")
+                    except:
+                        break
+            
+            logger.info(f"Found {len(room_types)} room types: {list(room_types.values())}")
+            logger.info(f"Room type mapping: {dict(sorted(room_types.items()))}")
+            
+            # Log all columns we checked for debugging
+            logger.debug(f"Checked columns from {start_col} to {start_col + max_cols}")
+            
+            return room_types
+        except Exception as e:
+            logger.warning(f"Could not read room types from header: {e}")
+            return room_types
+    
+    def _check_availability_google(self, row_num: int) -> Tuple[bool, Optional[str], int, Dict[str, int]]:
+        """Check availability in Google Sheet."""
+        try:
+            # Ensure connection is established
+            self._ensure_connected()
+            
+            # Get room types from header row
+            room_types = self._get_room_types_google()
+            
+            # Determine starting column - check if column B in row 2 has "Total Rooms"
+            try:
+                col_b_row2 = self.sheet.cell(2, 2).value
+                has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
+                start_col = 3 if has_total_rooms_col else 2
+            except:
+                start_col = 2
+            
+            # row_values() doesn't include empty cells, so we need to check each cell individually
+            # Room columns start from determined start_col
+            available_count = 0
+            total_rooms = 0
+            max_rooms_to_check = 20  # Check up to 20 rooms
+            room_type_counts = {}  # Track available rooms by type
+            
+            # Check each room column
+            for col_num in range(start_col, start_col + max_rooms_to_check):
+                try:
+                    # Check if this column has a room type defined
+                    room_type = room_types.get(col_num)
+                    if not room_type:
+                        # Skip columns without room types
+                        continue
+                    
+                    cell_value = self.sheet.cell(row_num, col_num).value
+                    total_rooms += 1
+                    
+                    # Blank or empty = available
+                    # Numbers (1, 2, etc.) = occupied with that many guests
+                    if cell_value is None or str(cell_value).strip() == '':
+                        available_count += 1
+                        room_type_counts[room_type] = room_type_counts.get(room_type, 0) + 1
+                        logger.debug(f"Column {col_num} ({room_type}): Available")
+                    else:
+                        logger.debug(f"Column {col_num} ({room_type}): Occupied (value: {cell_value})")
+                except Exception:
+                    # If we can't read more columns, we've reached the end of data
+                    break
+            
+            logger.debug(f"Row {row_num}: Found {available_count} available rooms out of {total_rooms} total rooms")
+            logger.debug(f"Available room types: {room_type_counts}")
+            
+            if total_rooms == 0:
+                return False, "No rooms configured for that date.", 0, {}
+            
+            is_available = available_count > 0
+            
+            # Build status message with room types - be explicit about all available types
+            if available_count == 0:
+                status = "Sorry, rooms are sold out on that date."
+            else:
+                # Create a clear list of all available room types
+                room_type_parts = []
+                for rtype, count in sorted(room_type_counts.items()):
+                    if count == 1:
+                        room_type_parts.append(f"1 {rtype} room")
+                    else:
+                        room_type_parts.append(f"{count} {rtype} rooms")
+                
+                room_type_list = ", ".join(room_type_parts)
+                
+                if available_count == 1:
+                    status = f"Limited availability on that date. Available: {room_type_list}."
+                else:
+                    status = f"Rooms are available on that date. Available: {room_type_list}."
+            
+            return is_available, status, available_count, room_type_counts
+        except Exception as e:
+            logger.error(f"Error checking Google Sheets availability: {e}", exc_info=True)
+            return False, "System temporarily unavailable.", 0, {}
+    
+    def update_booking(self, check_in: str, check_out: str, num_rooms: int, num_guests: int, room_type_preference: str = None) -> Tuple[bool, str]:
+        """
+        Update Excel/Google Sheet with booking after employee approval.
+        Fills blank cells for the booking period.
+        
+        Args:
+            check_in: Check-in date in YYYY-MM-DD format
+            check_out: Check-out date in YYYY-MM-DD format (exclusive)
+            num_rooms: Number of rooms to book
+            num_guests: Number of guests (value to fill in cells)
+            room_type_preference: Optional room type preference (e.g., "Double", "Twin", "Two Bedroom Villa")
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            # Parse dates
+            check_in_date = datetime.strptime(check_in, '%Y-%m-%d')
+            check_out_date = datetime.strptime(check_out, '%Y-%m-%d')
+            
+            # Generate all dates in range (check-in to check-out, exclusive)
+            current_date = check_in_date
+            dates_to_update = []
+            while current_date < check_out_date:
+                dates_to_update.append(current_date.strftime('%Y-%m-%d'))
+                current_date += timedelta(days=1)
+            
+            logger.info(f"Updating booking for {len(dates_to_update)} dates: {dates_to_update}")
+            
+            if self.use_google_sheets:
+                return self._update_booking_google(dates_to_update, num_rooms, num_guests, room_type_preference)
+            else:
+                return self._update_booking_excel(dates_to_update, num_rooms, num_guests, room_type_preference)
+        except Exception as e:
+            logger.error(f"Error updating booking: {e}")
+            return False, f"Error updating booking: {str(e)}"
+    
+    def _update_booking_excel(self, dates: List[str], num_rooms: int, num_guests: int, room_type_preference: str = None) -> Tuple[bool, str]:
+        """Update booking in Excel file."""
+        try:
+            # Calculate guests per room (divide total guests by number of rooms)
+            guests_per_room = num_guests // num_rooms if num_rooms > 0 else num_guests
+            logger.info(f"Booking {num_rooms} room(s) with {num_guests} total guests = {guests_per_room} guests per room")
+            
+            # Get room types mapping
+            room_types = self._get_room_types_excel()
+            
+            # Determine starting column - check if column B in row 2 has "Total Rooms"
+            try:
+                col_b_row2 = self.worksheet.cell(row=2, column=2).value
+                has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
+                start_col = 3 if has_total_rooms_col else 2
+            except:
+                start_col = 2
+            
+            # If room type preference is specified, find matching columns
+            preferred_columns = []
+            if room_type_preference:
+                room_type_lower = room_type_preference.strip().lower()
+                for col_idx, room_type in room_types.items():
+                    room_type_str = str(room_type).lower()
+                    # Match room type (handle variations)
+                    if (room_type_lower in room_type_str or 
+                        room_type_str in room_type_lower or
+                        (room_type_lower == "double" and "double" in room_type_str) or
+                        (room_type_lower == "twin" and "twin" in room_type_str) or
+                        ("villa" in room_type_lower and "villa" in room_type_str)):
+                        preferred_columns.append(col_idx)
+                logger.info(f"Found {len(preferred_columns)} columns matching room type '{room_type_preference}': {preferred_columns}")
+            
+            # Track rooms booked per date
+            total_rooms_booked = 0
+            dates_updated = 0
+            
+            for date_str in dates:
+                row_num = self.find_date_row(date_str)
+                if row_num is None:
+                    logger.warning(f"Date row not found for {date_str}, skipping")
+                    continue
+                
+                rooms_booked_for_date = 0
+                
+                # If we have preferred columns, use those first
+                columns_to_check = preferred_columns if preferred_columns else sorted(room_types.keys())
+                
+                for col_idx in columns_to_check:
+                    if rooms_booked_for_date >= num_rooms:
+                        break
+                    
+                    # Only fill columns that have room types
+                    if col_idx not in room_types:
+                        continue
+                    
+                    cell = self.worksheet.cell(row=row_num, column=col_idx)
+                    
+                    # Only fill blank cells (never overwrite)
+                    if cell.value is None or str(cell.value).strip() == '':
+                        cell.value = guests_per_room
+                        rooms_booked_for_date += 1
+                        total_rooms_booked += 1
+                        logger.info(f"Booked room in column {col_idx} ({room_types.get(col_idx)}) for date {date_str} with {guests_per_room} guests per room")
+                
+                if rooms_booked_for_date > 0:
+                    dates_updated += 1
+            
+            # Save the workbook
+            self.workbook.save(self.excel_path)
+            
+            expected_total = num_rooms * len(dates)
+            if total_rooms_booked < expected_total:
+                return False, f"Could only book {total_rooms_booked} out of {expected_total} requested room-days ({num_rooms} rooms × {len(dates)} nights). Updated {dates_updated} out of {len(dates)} dates."
+            
+            return True, f"Booking updated successfully. Booked {num_rooms} room(s) for {len(dates)} night(s)."
+        except Exception as e:
+            logger.error(f"Error updating Excel booking: {e}")
+            return False, f"Error updating booking: {str(e)}"
+    
+    def _update_booking_google(self, dates: List[str], num_rooms: int, num_guests: int, room_type_preference: str = None) -> Tuple[bool, str]:
+        """Update booking in Google Sheet."""
+        try:
+            # Calculate guests per room (divide total guests by number of rooms)
+            guests_per_room = num_guests // num_rooms if num_rooms > 0 else num_guests
+            logger.info(f"Booking {num_rooms} room(s) with {num_guests} total guests = {guests_per_room} guests per room")
+            
+            # Ensure connection is established
+            self._ensure_connected()
+            
+            # Determine starting column - check if column B in row 2 has "Total Rooms"
+            try:
+                col_b_row2 = self.sheet.cell(2, 2).value
+                has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
+                start_col = 3 if has_total_rooms_col else 2
+            except:
+                start_col = 2
+            
+            # Get room types to only update columns with valid room types
+            room_types = self._get_room_types_google()
+            
+            # If room type preference is specified, find matching columns
+            preferred_columns = []
+            if room_type_preference:
+                room_type_lower = room_type_preference.strip().lower()
+                for col_num, room_type in room_types.items():
+                    room_type_str = str(room_type).lower()
+                    # Match room type (handle variations)
+                    if (room_type_lower in room_type_str or 
+                        room_type_str in room_type_lower or
+                        (room_type_lower == "double" and "double" in room_type_str) or
+                        (room_type_lower == "twin" and "twin" in room_type_str) or
+                        ("villa" in room_type_lower and "villa" in room_type_str)):
+                        preferred_columns.append(col_num)
+                logger.info(f"Found {len(preferred_columns)} columns matching room type '{room_type_preference}': {preferred_columns}")
+            
+            # Track rooms booked per date
+            total_rooms_booked = 0
+            dates_updated = 0
+            
+            for date_str in dates:
+                row_num = self.find_date_row(date_str)
+                if row_num is None:
+                    logger.warning(f"Date row not found for {date_str}, skipping")
+                    continue
+                
+                rooms_booked_for_date = 0
+                
+                # Get row data to check current state
+                try:
+                    row_data = self.sheet.row_values(row_num)
+                except:
+                    row_data = []
+                
+                # Ensure we have enough columns
+                max_col_to_check = max(start_col + 20, len(row_data) if row_data else start_col + 20)
+                
+                # If we have preferred columns, use those first
+                columns_to_check = preferred_columns if preferred_columns else sorted(room_types.keys())
+                
+                # Find available rooms (blank cells) starting from determined start_col
+                # Only check columns that have room types defined
+                for col_num in columns_to_check:
+                    if rooms_booked_for_date >= num_rooms:
+                        break
+                    
+                    if col_num < start_col or col_num > max_col_to_check:
+                        continue
+                    
+                    # Only fill columns that have room types
+                    if col_num not in room_types:
+                        continue
+                    
+                    try:
+                        cell_value = self.sheet.cell(row_num, col_num).value
+                        
+                        # Only fill blank cells (never overwrite)
+                        if cell_value is None or str(cell_value).strip() == '':
+                            # Update cell with guests per room (not total guests)
+                            self.sheet.update_cell(row_num, col_num, guests_per_room)
+                            rooms_booked_for_date += 1
+                            total_rooms_booked += 1
+                            logger.info(f"Booked room in column {col_num} ({room_types.get(col_num)}) for date {date_str} with {guests_per_room} guests per room")
+                    except Exception as e:
+                        logger.debug(f"Error checking/updating column {col_num}: {e}")
+                        continue
+                
+                if rooms_booked_for_date > 0:
+                    dates_updated += 1
+            
+            expected_total = num_rooms * len(dates)
+            if total_rooms_booked < expected_total:
+                return False, f"Could only book {total_rooms_booked} out of {expected_total} requested room-days ({num_rooms} rooms × {len(dates)} nights). Updated {dates_updated} out of {len(dates)} dates."
+            
+            return True, f"Booking updated successfully. Booked {num_rooms} room(s) for {len(dates)} night(s)."
+        except Exception as e:
+            logger.error(f"Error updating Google Sheets booking: {e}")
+            return False, f"Error updating booking: {str(e)}"
+    
+    def _get_or_create_monthly_sheet(self, month_name: str):
+        """
+        Get or create a monthly bookings sheet in Google Sheets.
+        
+        Args:
+            month_name: Month name in lowercase (e.g., "january", "february")
+            
+        Returns:
+            Worksheet object for the monthly sheet
+        """
+        if not self.use_google_sheets:
+            return None
+        
+        try:
+            self._ensure_connected()
+            
+            # Format sheet name: "january_bookings"
+            sheet_name = f"{month_name.lower()}_bookings"
+            
+            # Try to get existing worksheet
+            try:
+                worksheet = self._spreadsheet.worksheet(sheet_name)
+                logger.info(f"Found existing monthly sheet: {sheet_name}")
+                return worksheet
+            except WorksheetNotFound:
+                # Create new worksheet
+                logger.info(f"Creating new monthly sheet: {sheet_name}")
+                worksheet = self._spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=15)
+                
+                # Set header row
+                headers = [
+                    "Booking ID",
+                    "Customer Name",
+                    "Phone Number",
+                    "Check-in Date",
+                    "Check-out Date",
+                    "Number of Rooms",
+                    "Number of Guests",
+                    "Room Type Preference",
+                    "Status",
+                    "Created Date",
+                    "Approved Date",
+                    "Rejected Date",
+                    "Rejection Reason"
+                ]
+                worksheet.append_row(headers)
+                
+                # Format header row (bold)
+                try:
+                    worksheet.format('A1:M1', {'textFormat': {'bold': True}})
+                except:
+                    pass  # Formatting is optional
+                
+                logger.info(f"✅ Created monthly bookings sheet: {sheet_name}")
+                return worksheet
+        except Exception as e:
+            logger.error(f"Error getting/creating monthly sheet: {e}")
+            return None
+    
+    def log_approved_booking(self, booking_data: Dict) -> Tuple[bool, str]:
+        """
+        Log an approved booking to the monthly bookings sheet.
+        
+        Args:
+            booking_data: Dictionary containing booking information with keys:
+                - booking_id
+                - customer_name
+                - phone_number
+                - check_in_date
+                - check_out_date
+                - num_rooms
+                - num_guests
+                - room_type_preference (optional)
+                - status
+                - created_at
+                - approved_at (optional)
+                - rejected_at (optional)
+                - rejection_reason (optional)
+                
+        Returns:
+            Tuple of (success, message)
+        """
+        if not self.use_google_sheets:
+            return True, "Monthly logging only available for Google Sheets"
+        
+        try:
+            # Determine month from approved_at or check_in_date
+            date_str = booking_data.get('approved_at') or booking_data.get('check_in_date') or booking_data.get('created_at')
+            if not date_str:
+                return False, "No date found in booking data"
+            
+            # Parse date
+            try:
+                # Handle ISO format datetime strings
+                if 'T' in date_str:
+                    date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+                else:
+                    date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+            except:
+                # Try other formats
+                try:
+                    date_obj = datetime.strptime(date_str.split('T')[0], '%Y-%m-%d')
+                except:
+                    return False, f"Could not parse date: {date_str}"
+            
+            # Get month name
+            month_names = {
+                1: 'january', 2: 'february', 3: 'march', 4: 'april',
+                5: 'may', 6: 'june', 7: 'july', 8: 'august',
+                9: 'september', 10: 'october', 11: 'november', 12: 'december'
+            }
+            month_name = month_names.get(date_obj.month, 'unknown')
+            
+            # Get or create monthly sheet
+            worksheet = self._get_or_create_monthly_sheet(month_name)
+            if not worksheet:
+                return False, "Could not create or access monthly sheet"
+            
+            # Prepare row data
+            row_data = [
+                booking_data.get('booking_id', ''),
+                booking_data.get('customer_name', ''),
+                booking_data.get('phone_number', ''),
+                booking_data.get('check_in_date', ''),
+                booking_data.get('check_out_date', ''),
+                booking_data.get('num_rooms', ''),
+                booking_data.get('num_guests', ''),
+                booking_data.get('room_type_preference', '') or '',
+                booking_data.get('status', ''),
+                booking_data.get('created_at', ''),
+                booking_data.get('approved_at', '') or '',
+                booking_data.get('rejected_at', '') or '',
+                booking_data.get('rejection_reason', '') or ''
+            ]
+            
+            # Append row to sheet
+            worksheet.append_row(row_data)
+            
+            logger.info(f"✅ Logged booking {booking_data.get('booking_id')} to {month_name}_bookings sheet")
+            return True, f"Booking logged to {month_name}_bookings sheet"
+            
+        except Exception as e:
+            logger.error(f"Error logging booking to monthly sheet: {e}", exc_info=True)
+            return False, f"Error logging booking: {str(e)}"

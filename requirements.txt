@@ -1,0 +1,25 @@
+# Core dependencies
+flask>=3.0.0
+flask-limiter>=3.5.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# LangChain dependencies
+langchain>=0.1.0,<0.3.0
+langchain-openai>=0.0.5
+langchain-core>=0.1.0
+
+# OpenAI
+openai>=1.0.0
+
+# Excel handling
+openpyxl>=3.1.0
+
+# Google Sheets support
+gspread>=5.12.0
+google-auth>=2.25.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+
+# Date parsing (using built-in datetime, but dateutil for better parsing if needed)
+python-dateutil>=2.8.2
