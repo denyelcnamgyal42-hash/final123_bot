@@ -22,6 +22,17 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Register dashboard routes to make them accessible on the same port (for Render deployment)
+# This allows the dashboard to be accessed via the main service URL: https://your-service.onrender.com/dashboard
+def register_dashboard_routes():
+    """Register employee dashboard routes with the main webhook app."""
+    try:
+        # Import dashboard app after it's created to avoid circular imports
+        # We'll register routes after both apps are initialized in main.py
+        pass  # Routes will be registered in main.py after initialization
+    except Exception as e:
+        logger.warning(f"⚠️ Could not register dashboard routes: {e}")
+
 limiter = Limiter(
     app=app, 
     key_func=get_remote_address,

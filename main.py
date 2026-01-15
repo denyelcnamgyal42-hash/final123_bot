@@ -74,6 +74,27 @@ def main():
         sys.exit(1)
     logger.info("✅ Agent initialized successfully")
     
+    # Register dashboard routes with webhook app (for Render - single port deployment)
+    # This makes dashboard accessible via the main service URL
+    try:
+        from employee_dashboard import app as dashboard_app
+        # Register all dashboard routes with the webhook app
+        for rule in dashboard_app.url_map.iter_rules():
+            if rule.endpoint != 'static':  # Skip static files
+                # Get the view function
+                view_func = dashboard_app.view_functions[rule.endpoint]
+                # Register with webhook app
+                webhook_app.add_url_rule(
+                    rule.rule,
+                    endpoint=f"dashboard_{rule.endpoint}",  # Prefix to avoid conflicts
+                    view_func=view_func,
+                    methods=rule.methods
+                )
+        logger.info("✅ Dashboard routes registered with webhook app (accessible on same port)")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not register dashboard routes: {e}")
+        logger.warning("Dashboard will only be accessible on separate port (not available on Render)")
+    
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)

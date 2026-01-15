@@ -114,9 +114,11 @@ Just paste the entire JSON (including the outer braces) into the `CREDENTIALS_JS
    - Visit: `https://your-service-name.onrender.com/health`
    - Should return: `{"status": "healthy", ...}`
 
-3. **Access Dashboard** (if needed):
-   - The dashboard runs on port `DASHBOARD_PORT` (default: 5001)
-   - For production access, consider deploying as a separate service
+3. **Access Dashboard**:
+   - Dashboard is accessible via the main service URL: `https://your-service-name.onrender.com/dashboard?token=your-auth-token`
+   - Example: `https://final123-bot.onrender.com/dashboard?token=hotel-staff-2024`
+   - The dashboard routes are registered with the main webhook app, so they're accessible on the same port
+   - Use the `DASHBOARD_AUTH_TOKEN` you set in environment variables as the `token` query parameter
 
 ## Troubleshooting
 
