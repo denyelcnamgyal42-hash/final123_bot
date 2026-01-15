@@ -1,0 +1,26 @@
+services:
+  # Main Service - Runs both WhatsApp Webhook and Employee Dashboard
+  # Note: Dashboard will be on a different port (DASHBOARD_PORT env var)
+  # For production, you may want to deploy dashboard as a separate service
+  - type: web
+    name: hotel-chatbot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: RENDER
+        value: true
+      - key: ENVIRONMENT
+        value: production
+      # PORT is automatically set by Render, no need to specify
+      # Add your other environment variables in Render dashboard:
+      # - OPENAI_API_KEY
+      # - WHATSAPP_ACCESS_TOKEN
+      # - WHATSAPP_PHONE_NUMBER_ID
+      # - WHATSAPP_VERIFY_TOKEN
+      # - GOOGLE_SHEET_ID
+      # - GOOGLE_SHEETS_CREDENTIALS_PATH (or upload credentials.json)
+      # - DASHBOARD_AUTH_TOKEN
+      # - CONTACT_PHONE_NUMBER
+    healthCheckPath: /health
+    plan: starter  # Change to 'standard' or 'pro' for production workloads

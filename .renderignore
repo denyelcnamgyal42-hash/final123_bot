@@ -9,18 +9,21 @@ venv/
 ENV/
 .venv
 
-# Environment variables
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
 .env
 .env.local
 .env.*.local
 
-# Credentials and secrets
-credentials.json
-*.pem
-*.key
-*.json
-!package.json
-!package-lock.json
+# Logs
+*.log
+logs/
 
 # Data files
 *.xlsx
@@ -29,16 +32,14 @@ sessions.json
 bookings.json
 vectorstore/
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
+# Credentials (should be in environment variables)
+credentials.json
+*.pem
+*.key
 
-# Logs
-*.log
-logs/
+# Git
+.git/
+.gitignore
 
 # OS
 .DS_Store
@@ -48,3 +49,7 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Documentation
+*.md
+!README.md

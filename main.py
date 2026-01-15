@@ -12,9 +12,14 @@ from employee_dashboard import app as dashboard_app
 from langchain_agent import initialize_agent
 import config
 
+# Configure logging for production
+log_level = logging.INFO if not config.IS_PRODUCTION else logging.WARNING
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=log_level,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -23,30 +28,35 @@ def run_webhook():
     """Run the WhatsApp webhook server."""
     try:
         logger.info(f"🚀 Starting WhatsApp webhook server on port {config.PORT}")
+        # Use threaded mode for production, disable debug
         webhook_app.run(
             host="0.0.0.0",
             port=config.PORT,
-            debug=config.DEBUG,
+            debug=False,  # Always False in production
             threaded=True,
-            use_reloader=False  # Disable reloader when running in thread
+            use_reloader=False
         )
     except Exception as e:
         logger.error(f"❌ Error starting webhook server: {e}", exc_info=True)
+        raise  # Re-raise to ensure Render detects the failure
 
 
 def run_dashboard():
     """Run the employee dashboard server."""
     try:
         logger.info(f"🚀 Starting employee dashboard on port {config.DASHBOARD_PORT}")
+        # Use threaded mode for production, disable debug
         dashboard_app.run(
             host="0.0.0.0",
             port=config.DASHBOARD_PORT,
-            debug=config.DEBUG,
+            debug=False,  # Always False in production
             threaded=True,
-            use_reloader=False  # Disable reloader when running in thread
+            use_reloader=False
         )
     except Exception as e:
         logger.error(f"❌ Error starting dashboard server: {e}", exc_info=True)
+        # Don't raise here - dashboard failure shouldn't stop webhook
+        logger.warning("⚠️ Dashboard server failed, but webhook will continue running")
 
 
 def signal_handler(sig, frame):
