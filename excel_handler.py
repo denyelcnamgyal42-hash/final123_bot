@@ -62,6 +62,22 @@ class ExcelHandler:
         self._client = None
         self._spreadsheet = None
         
+        # Caching for Google Sheets to reduce API calls
+        self._date_column_cache = None
+        self._date_column_cache_time = 0
+        self._date_column_cache_ttl = 300  # Cache for 5 minutes
+        self._room_types_cache = None
+        self._room_types_cache_time = 0
+        self._room_types_cache_ttl = 600  # Cache for 10 minutes
+        self._row_data_cache = {}  # Cache row data by row number
+        self._row_cache_ttl = 60  # Cache rows for 1 minute
+        
+        # Rate limiting
+        self._last_api_call_time = 0
+        self._min_api_interval = 0.1  # Minimum 100ms between API calls
+        self._consecutive_429_errors = 0
+        self._backoff_until = 0
+        
         if self.use_google_sheets:
             self._init_google_sheets()
         elif excel_path:
@@ -75,6 +91,41 @@ class ExcelHandler:
                 return creds_data.get('client_email', 'Not found')
         except Exception:
             return 'Not found'
+    
+    def _rate_limit_api_call(self):
+        """Enforce rate limiting between API calls."""
+        current_time = time.time()
+        
+        # Check if we're in backoff period due to 429 errors
+        if current_time < self._backoff_until:
+            wait_time = self._backoff_until - current_time
+            logger.debug(f"Rate limit backoff: waiting {wait_time:.2f} seconds")
+            time.sleep(wait_time)
+            current_time = time.time()
+        
+        # Enforce minimum interval between API calls
+        time_since_last_call = current_time - self._last_api_call_time
+        if time_since_last_call < self._min_api_interval:
+            sleep_time = self._min_api_interval - time_since_last_call
+            time.sleep(sleep_time)
+        
+        self._last_api_call_time = time.time()
+    
+    def _handle_429_error(self, error):
+        """Handle 429 (quota exceeded) errors with exponential backoff."""
+        self._consecutive_429_errors += 1
+        # Exponential backoff: 2^errors seconds, max 60 seconds
+        backoff_time = min(2 ** self._consecutive_429_errors, 60)
+        self._backoff_until = time.time() + backoff_time
+        logger.warning(f"Rate limit hit (429). Backing off for {backoff_time} seconds. Consecutive errors: {self._consecutive_429_errors}")
+        raise error
+    
+    def _reset_429_backoff(self):
+        """Reset 429 error tracking after successful API call."""
+        if self._consecutive_429_errors > 0:
+            logger.info(f"API calls successful. Resetting 429 backoff counter (was {self._consecutive_429_errors})")
+        self._consecutive_429_errors = 0
+        self._backoff_until = 0
     
     def _ensure_connected(self, force_reconnect: bool = False):
         """Ensure connection to Google Sheets is established."""
@@ -352,8 +403,29 @@ class ExcelHandler:
             target_month = date_obj.month
             target_day = date_obj.day
             
-            # Get all dates from column A (skip header rows 1-3)
-            dates = self.sheet.col_values(1)
+            # Check cache first
+            current_time = time.time()
+            if (self._date_column_cache is not None and 
+                (current_time - self._date_column_cache_time) < self._date_column_cache_ttl):
+                dates = self._date_column_cache
+                logger.debug(f"Using cached date column ({len(dates)} rows)")
+            else:
+                # Rate limit API call
+                self._rate_limit_api_call()
+                
+                try:
+                    # Get all dates from column A (skip header rows 1-3)
+                    dates = self.sheet.col_values(1)
+                    # Cache the result
+                    self._date_column_cache = dates
+                    self._date_column_cache_time = current_time
+                    self._reset_429_backoff()
+                    logger.debug(f"Cached date column ({len(dates)} rows)")
+                except Exception as e:
+                    error_str = str(e).lower()
+                    if '429' in error_str or 'quota' in error_str:
+                        self._handle_429_error(e)
+                    raise
             
             logger.debug(f"Looking for date: {date_str} (month={target_month}, day={target_day})")
             logger.debug(f"Found {len(dates)} rows in column A")
@@ -537,37 +609,163 @@ class ExcelHandler:
             # Track which columns are available for all dates
             available_columns_by_type = {}  # {room_type: [list of column indices]}
             
-            for col_idx, room_type_name in room_types_map.items():
-                is_available_all_dates = True
+            # Get all row numbers first
+            date_row_map = {}  # {date_str: row_num}
+            for date_str in dates_to_check:
+                row_num = self.find_date_row(date_str)
+                if row_num is not None:
+                    date_row_map[date_str] = row_num
+            
+            if not date_row_map:
+                return False, "Could not find dates in the sheet.", 0, {}
+            
+            # For Google Sheets, batch read all rows at once
+            if self.use_google_sheets:
+                # Get all unique row numbers
+                row_nums = sorted(set(date_row_map.values()))
                 
-                # Check this column for all dates
-                for date_str in dates_to_check:
-                    row_num = self.find_date_row(date_str)
-                    if row_num is None:
-                        is_available_all_dates = False
-                        break
+                # Batch read all rows in one API call
+                if row_nums:
+                    min_row = min(row_nums)
+                    max_row = max(row_nums)
+                    # Read all columns we need (from start_col to max column)
+                    max_col = max(room_types_map.keys()) if room_types_map else 30
+                    start_col = min(room_types_map.keys()) if room_types_map else 2
                     
-                    # Check if this room is available on this date
+                    # Convert column numbers to letters for A1 notation
+                    def col_num_to_letter(n):
+                        result = ""
+                        while n > 0:
+                            n -= 1
+                            result = chr(65 + (n % 26)) + result
+                            n //= 26
+                        return result
+                    
+                    start_col_letter = col_num_to_letter(start_col)
+                    end_col_letter = col_num_to_letter(max_col)
+                    range_name = f'{start_col_letter}{min_row}:{end_col_letter}{max_row}'
+                    
+                    self._rate_limit_api_call()
                     try:
-                        if self.use_google_sheets:
-                            cell_value = self.sheet.cell(row_num, col_idx).value
-                        else:
-                            cell_value = self.worksheet.cell(row=row_num, column=col_idx).value
+                        batch_data = self.sheet.get(range_name)
+                        self._reset_429_backoff()
                         
-                        # Room is occupied if cell has a value
-                        if cell_value is not None and str(cell_value).strip() != '':
+                        # Create a map: {row_num: [cell_values]}
+                        row_data_map = {}
+                        for row_idx, row_data in enumerate(batch_data):
+                            row_num = min_row + row_idx
+                            row_data_map[row_num] = row_data  # Store as list
+                        
+                        # Now check availability using batch data
+                        for col_idx, room_type_name in room_types_map.items():
+                            is_available_all_dates = True
+                            
+                            # Check this column for all dates
+                            for date_str in dates_to_check:
+                                row_num = date_row_map.get(date_str)
+                                if row_num is None:
+                                    is_available_all_dates = False
+                                    break
+                                
+                                # Get cell value from batch data
+                                # Adjust col_idx relative to start_col (col_idx is 1-based, start_col is 1-based)
+                                col_offset = col_idx - start_col
+                                row_data = row_data_map.get(row_num, [])
+                                
+                                # Get cell value from the list
+                                if col_offset >= 0 and col_offset < len(row_data):
+                                    cell_value = row_data[col_offset]
+                                else:
+                                    cell_value = None
+                                
+                                # Room is occupied if cell has a value
+                                if cell_value is not None and str(cell_value).strip() != '':
+                                    is_available_all_dates = False
+                                    break
+                            
+                            # If room is available for all dates, add it
+                            if is_available_all_dates:
+                                if room_type_name not in available_columns_by_type:
+                                    available_columns_by_type[room_type_name] = []
+                                available_columns_by_type[room_type_name].append(col_idx)
+                    
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        if '429' in error_str or 'quota' in error_str:
+                            self._handle_429_error(e)
+                        # Fallback to individual reads with caching
+                        logger.warning(f"Batch read failed, falling back to individual reads: {e}")
+                        for col_idx, room_type_name in room_types_map.items():
+                            is_available_all_dates = True
+                            for date_str in dates_to_check:
+                                row_num = date_row_map.get(date_str)
+                                if row_num is None:
+                                    is_available_all_dates = False
+                                    break
+                                try:
+                                    # Use cached row data if available
+                                    cache_key = f"row_{row_num}"
+                                    current_time = time.time()
+                                    if cache_key in self._row_data_cache:
+                                        cached_data, cache_time = self._row_data_cache[cache_key]
+                                        if (current_time - cache_time) < self._row_cache_ttl:
+                                            row_data = cached_data
+                                            col_index = col_idx - 1
+                                            cell_value = row_data[col_index] if col_index < len(row_data) else None
+                                        else:
+                                            # Cache expired, read fresh
+                                            self._rate_limit_api_call()
+                                            cell_value = self.sheet.cell(row_num, col_idx).value
+                                            self._reset_429_backoff()
+                                    else:
+                                        # Not cached, read fresh
+                                        self._rate_limit_api_call()
+                                        cell_value = self.sheet.cell(row_num, col_idx).value
+                                        self._reset_429_backoff()
+                                    
+                                    if cell_value is not None and str(cell_value).strip() != '':
+                                        is_available_all_dates = False
+                                        break
+                                except Exception as e2:
+                                    error_str = str(e2).lower()
+                                    if '429' in error_str or 'quota' in error_str:
+                                        self._handle_429_error(e2)
+                                    is_available_all_dates = False
+                                    break
+                            if is_available_all_dates:
+                                if room_type_name not in available_columns_by_type:
+                                    available_columns_by_type[room_type_name] = []
+                                available_columns_by_type[room_type_name].append(col_idx)
+            else:
+                # Excel: use individual reads (no API quota issues)
+                for col_idx, room_type_name in room_types_map.items():
+                    is_available_all_dates = True
+                    
+                    # Check this column for all dates
+                    for date_str in dates_to_check:
+                        row_num = date_row_map.get(date_str)
+                        if row_num is None:
                             is_available_all_dates = False
                             break
-                    except Exception as e:
-                        logger.debug(f"Error checking column {col_idx} for date {date_str}: {e}")
-                        is_available_all_dates = False
-                        break
-                
-                # If room is available for all dates, add it
-                if is_available_all_dates:
-                    if room_type_name not in available_columns_by_type:
-                        available_columns_by_type[room_type_name] = []
-                    available_columns_by_type[room_type_name].append(col_idx)
+                        
+                        # Check if this room is available on this date
+                        try:
+                            cell_value = self.worksheet.cell(row=row_num, column=col_idx).value
+                            
+                            # Room is occupied if cell has a value
+                            if cell_value is not None and str(cell_value).strip() != '':
+                                is_available_all_dates = False
+                                break
+                        except Exception as e:
+                            logger.debug(f"Error checking column {col_idx} for date {date_str}: {e}")
+                            is_available_all_dates = False
+                            break
+                    
+                    # If room is available for all dates, add it
+                    if is_available_all_dates:
+                        if room_type_name not in available_columns_by_type:
+                            available_columns_by_type[room_type_name] = []
+                        available_columns_by_type[room_type_name].append(col_idx)
             
             # Count available rooms by type
             room_types_dict = {rtype: len(cols) for rtype, cols in available_columns_by_type.items()}
@@ -784,54 +982,71 @@ class ExcelHandler:
         Dynamic approach: checks row 1 first (starting from column B), falls back to row 2 if needed.
         Skips column A (which typically has property name) and column B in row 2 (which has "Total Rooms").
         """
+        # Check cache first
+        current_time = time.time()
+        if (self._room_types_cache is not None and 
+            (current_time - self._room_types_cache_time) < self._room_types_cache_ttl):
+            logger.debug("Using cached room types")
+            return self._room_types_cache.copy()
+        
         room_types = {}
         try:
             # Ensure connection is established
             self._ensure_connected()
             
-            # Strategy: Check row 1 for room types starting from column B (skip column A)
-            # Also check row 2 as fallback, but skip "Total Rooms" in column B
-            # Check up to 30 columns to ensure we catch all rooms
+            # Strategy: Use batch read to get rows 1 and 2 at once (much more efficient)
             max_cols = 30  # Check at least 30 columns
             
-            # First, check row 2 column B to see if it says "Total Rooms" - this helps us identify the structure
+            # Rate limit API call
+            self._rate_limit_api_call()
+            
             try:
-                col_b_row2 = self.sheet.cell(2, 2).value
-                has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
-            except:
+                # Batch read rows 1 and 2 in one API call
+                # Read from column B (2) to column AF (32) for both rows
+                range_name = f'B1:AF2'
+                header_data = self.sheet.get(range_name)
+                self._reset_429_backoff()
+                
+                # Parse the batch data
+                row1_data = header_data[0] if len(header_data) > 0 else []
+                row2_data = header_data[1] if len(header_data) > 1 else []
+                
+                # First, check row 2 column B (index 0) to see if it says "Total Rooms"
                 has_total_rooms_col = False
-            
-            # Start from column B (2) - skip column A which has property name
-            start_col = 2
-            # If column B in row 2 has "Total Rooms", room data starts from column C (3)
-            if has_total_rooms_col:
-                start_col = 3
-            
-            for col_num in range(start_col, start_col + max_cols):
-                try:
-                    # First, try row 1 (room type header)
-                    cell_value_row1 = self.sheet.cell(1, col_num).value
-                    room_type = None
-                    
-                    if cell_value_row1:
-                        room_type = str(cell_value_row1).strip()
-                        # Skip if it's "Room X", "Total Rooms", "Date", or empty
-                        # But allow room types that contain "bedroom" or "villa" (like "Two Bedroom Villa")
-                        room_type_lower = room_type.lower()
-                        if (room_type_lower.startswith("room ") or 
-                            room_type_lower in ["", "total rooms", "date"]):
-                            room_type = None
-                        # Note: We now allow "bedroom" and "villa" in room type names
-                        # Only skip if it's clearly a generic label
-                    
-                    # If row 1 didn't have a valid room type, check row 2 (but skip "Total Rooms")
-                    if not room_type:
-                        cell_value_row2 = self.sheet.cell(2, col_num).value
-                        if cell_value_row2:
+                if len(row2_data) > 0:
+                    col_b_row2 = row2_data[0] if len(row2_data) > 0 else ""
+                    has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
+                
+                # Start from column B (2) - skip column A which has property name
+                start_col = 2
+                # If column B in row 2 has "Total Rooms", room data starts from column C (3)
+                if has_total_rooms_col:
+                    start_col = 3
+                
+                # Process columns starting from start_col
+                # Adjust indices: row1_data[0] = column B, row1_data[1] = column C, etc.
+                for col_offset in range(start_col - 2, min(max_cols, len(row1_data))):
+                    col_num = col_offset + 2  # Actual column number (B=2, C=3, etc.)
+                    try:
+                        # Get values from batch data
+                        cell_value_row1 = row1_data[col_offset] if col_offset < len(row1_data) else None
+                        cell_value_row2 = row2_data[col_offset] if col_offset < len(row2_data) else None
+                        
+                        room_type = None
+                        
+                        if cell_value_row1:
+                            room_type = str(cell_value_row1).strip()
+                            # Skip if it's "Room X", "Total Rooms", "Date", or empty
+                            room_type_lower = room_type.lower()
+                            if (room_type_lower.startswith("room ") or 
+                                room_type_lower in ["", "total rooms", "date"]):
+                                room_type = None
+                        
+                        # If row 1 didn't have a valid room type, check row 2 (but skip "Total Rooms")
+                        if not room_type and cell_value_row2:
                             potential_type = str(cell_value_row2).strip()
                             potential_lower = potential_type.lower()
                             # If it's "Room X" format, we still want to include it as a room
-                            # but we'll use a generic name or check if there's data in the column
                             if potential_lower.startswith("room "):
                                 # This is a room column, check if row 1 has a type or use generic
                                 if not cell_value_row1 or str(cell_value_row1).strip() == "":
@@ -843,40 +1058,47 @@ class ExcelHandler:
                             elif potential_lower not in ["total rooms", "date"]:
                                 # Not "Room X" but also not a generic label, use it as room type
                                 room_type = potential_type
+                        
+                        # If we found a valid room type, add it
+                        if room_type and room_type:
+                            room_types[col_num] = room_type
+                            logger.debug(f"Found room type '{room_type}' in column {col_num}")
                     
-                    # If we found a valid room type, add it
-                    if room_type and room_type:
-                        room_types[col_num] = room_type
-                        logger.debug(f"Found room type '{room_type}' in column {col_num}")
-                    
-                except Exception as e:
-                    # If we can't read more columns, we've reached the end
-                    logger.debug(f"Stopped reading room types at column {col_num}: {e}")
-                    break
-            
-            # If no room types found, try a more aggressive search starting from column B
-            if not room_types:
-                logger.warning("No room types found with standard method, trying alternative approach...")
-                for col_num in range(2, 2 + max_cols):
-                    try:
-                        cell_value_row1 = self.sheet.cell(1, col_num).value
-                        if cell_value_row1:
-                            val = str(cell_value_row1).strip()
-                            # Accept any non-empty value that's not a generic label
-                            # Allow room types with "bedroom" or "villa" in the name
-                            if (val and 
-                                not val.lower().startswith("room ") and
-                                val.lower() not in ["", "total rooms", "date"]):
-                                room_types[col_num] = val
-                                logger.debug(f"Found room type '{val}' in column {col_num} (alternative method)")
-                    except:
+                    except Exception as e:
+                        # If we can't read more columns, we've reached the end
+                        logger.debug(f"Stopped reading room types at column {col_num}: {e}")
                         break
+                
+                # If no room types found, try a more aggressive search starting from column B
+                if not room_types:
+                    logger.warning("No room types found with standard method, trying alternative approach...")
+                    for col_offset in range(0, min(max_cols, len(row1_data))):
+                        col_num = col_offset + 2  # Actual column number
+                        try:
+                            cell_value_row1 = row1_data[col_offset] if col_offset < len(row1_data) else None
+                            if cell_value_row1:
+                                val = str(cell_value_row1).strip()
+                                # Accept any non-empty value that's not a generic label
+                                if (val and 
+                                    not val.lower().startswith("room ") and
+                                    val.lower() not in ["", "total rooms", "date"]):
+                                    room_types[col_num] = val
+                                    logger.debug(f"Found room type '{val}' in column {col_num} (alternative method)")
+                        except:
+                            break
+                
+            except Exception as e:
+                error_str = str(e).lower()
+                if '429' in error_str or 'quota' in error_str:
+                    self._handle_429_error(e)
+                raise
+            
+            # Cache the result
+            self._room_types_cache = room_types.copy()
+            self._room_types_cache_time = current_time
             
             logger.info(f"Found {len(room_types)} room types: {list(room_types.values())}")
             logger.info(f"Room type mapping: {dict(sorted(room_types.items()))}")
-            
-            # Log all columns we checked for debugging
-            logger.debug(f"Checked columns from {start_col} to {start_col + max_cols}")
             
             return room_types
         except Exception as e:
@@ -892,44 +1114,91 @@ class ExcelHandler:
             # Get room types from header row
             room_types = self._get_room_types_google()
             
-            # Determine starting column - check if column B in row 2 has "Total Rooms"
-            try:
-                col_b_row2 = self.sheet.cell(2, 2).value
-                has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
-                start_col = 3 if has_total_rooms_col else 2
-            except:
-                start_col = 2
+            # Determine starting column from cached room types or check
+            start_col = 2
+            if room_types:
+                # Use the minimum column from room types
+                start_col = min(room_types.keys())
+            else:
+                # Fallback: check if column B in row 2 has "Total Rooms"
+                try:
+                    self._rate_limit_api_call()
+                    col_b_row2 = self.sheet.cell(2, 2).value
+                    has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
+                    start_col = 3 if has_total_rooms_col else 2
+                    self._reset_429_backoff()
+                except Exception as e:
+                    error_str = str(e).lower()
+                    if '429' in error_str or 'quota' in error_str:
+                        self._handle_429_error(e)
+                    start_col = 2
             
-            # row_values() doesn't include empty cells, so we need to check each cell individually
-            # Room columns start from determined start_col
+            # Check cache for row data
+            current_time = time.time()
+            cache_key = f"row_{row_num}"
+            row_data = None
+            
+            if cache_key in self._row_data_cache:
+                cached_data, cache_time = self._row_data_cache[cache_key]
+                if (current_time - cache_time) < self._row_cache_ttl:
+                    row_data = cached_data
+                    logger.debug(f"Using cached row data for row {row_num}")
+            
+            if row_data is None:
+                # Batch read the entire row in one API call
+                max_col_to_read = max(start_col + 20, max(room_types.keys()) if room_types else start_col + 20)
+                range_name = f'{row_num}:{row_num}'  # Read entire row
+                
+                self._rate_limit_api_call()
+                try:
+                    # Get row values - this returns a 2D array with one row
+                    row_values = self.sheet.get(range_name)
+                    if row_values and len(row_values) > 0:
+                        row_data = row_values[0]  # First (and only) row
+                    else:
+                        row_data = []
+                    self._reset_429_backoff()
+                    
+                    # Cache the result
+                    self._row_data_cache[cache_key] = (row_data, current_time)
+                    logger.debug(f"Cached row data for row {row_num}")
+                except Exception as e:
+                    error_str = str(e).lower()
+                    if '429' in error_str or 'quota' in error_str:
+                        self._handle_429_error(e)
+                    # Fallback to empty list
+                    row_data = []
+            
+            # Process row data
             available_count = 0
             total_rooms = 0
-            max_rooms_to_check = 20  # Check up to 20 rooms
             room_type_counts = {}  # Track available rooms by type
             
-            # Check each room column
-            for col_num in range(start_col, start_col + max_rooms_to_check):
+            # Check each room column using cached row data
+            for col_num in sorted(room_types.keys()):
                 try:
-                    # Check if this column has a room type defined
-                    room_type = room_types.get(col_num)
-                    if not room_type:
-                        # Skip columns without room types
-                        continue
+                    room_type = room_types[col_num]
                     
-                    cell_value = self.sheet.cell(row_num, col_num).value
+                    # Get cell value from row data (column indices are 0-based, so col_num - 1)
+                    # Column A = index 0, Column B = index 1, etc.
+                    col_index = col_num - 1
+                    cell_value = None
+                    if col_index < len(row_data):
+                        cell_value = row_data[col_index]
+                    
                     total_rooms += 1
                     
                     # Blank or empty = available
                     # Numbers (1, 2, etc.) = occupied with that many guests
-                    if cell_value is None or str(cell_value).strip() == '':
+                    if cell_value is None or (isinstance(cell_value, str) and cell_value.strip() == ''):
                         available_count += 1
                         room_type_counts[room_type] = room_type_counts.get(room_type, 0) + 1
                         logger.debug(f"Column {col_num} ({room_type}): Available")
                     else:
                         logger.debug(f"Column {col_num} ({room_type}): Occupied (value: {cell_value})")
-                except Exception:
-                    # If we can't read more columns, we've reached the end of data
-                    break
+                except Exception as e:
+                    logger.debug(f"Error processing column {col_num}: {e}")
+                    continue
             
             logger.debug(f"Row {row_num}: Found {available_count} available rooms out of {total_rooms} total rooms")
             logger.debug(f"Available room types: {room_type_counts}")
@@ -1154,15 +1423,51 @@ class ExcelHandler:
                         continue
                     
                     try:
-                        cell_value = self.sheet.cell(row_num, col_num).value
+                        # Try to use cached row data first
+                        cache_key = f"row_{row_num}"
+                        current_time = time.time()
+                        cell_value = None
+                        
+                        if cache_key in self._row_data_cache:
+                            cached_data, cache_time = self._row_data_cache[cache_key]
+                            if (current_time - cache_time) < self._row_cache_ttl:
+                                # Use cached data
+                                col_index = col_num - 1
+                                if col_index < len(cached_data):
+                                    cell_value = cached_data[col_index]
+                        
+                        # If not in cache or expired, read from sheet
+                        if cell_value is None:
+                            self._rate_limit_api_call()
+                            try:
+                                cell_value = self.sheet.cell(row_num, col_num).value
+                                self._reset_429_backoff()
+                            except Exception as e2:
+                                error_str = str(e2).lower()
+                                if '429' in error_str or 'quota' in error_str:
+                                    self._handle_429_error(e2)
+                                raise
                         
                         # Only fill blank cells (never overwrite)
                         if cell_value is None or str(cell_value).strip() == '':
                             # Update cell with guests per room (not total guests)
-                            self.sheet.update_cell(row_num, col_num, guests_per_room)
-                            rooms_booked_for_date += 1
-                            total_rooms_booked += 1
-                            logger.info(f"Booked room in column {col_num} ({room_types.get(col_num)}) for date {date_str} with {guests_per_room} guests per room")
+                            self._rate_limit_api_call()
+                            try:
+                                self.sheet.update_cell(row_num, col_num, guests_per_room)
+                                self._reset_429_backoff()
+                                
+                                # Invalidate cache for this row since we updated it
+                                if cache_key in self._row_data_cache:
+                                    del self._row_data_cache[cache_key]
+                                
+                                rooms_booked_for_date += 1
+                                total_rooms_booked += 1
+                                logger.info(f"Booked room in column {col_num} ({room_types.get(col_num)}) for date {date_str} with {guests_per_room} guests per room")
+                            except Exception as e2:
+                                error_str = str(e2).lower()
+                                if '429' in error_str or 'quota' in error_str:
+                                    self._handle_429_error(e2)
+                                raise
                     except Exception as e:
                         logger.debug(f"Error checking/updating column {col_num}: {e}")
                         continue

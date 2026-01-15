@@ -84,7 +84,11 @@ class DateParser:
         # Remove ordinal suffixes (st, nd, rd, th)
         date_string = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', date_string)
         
-        # Pattern 1: "21 January" or "21 Jan"
+        # Remove "of" from date strings (e.g., "5 of February" -> "5 February", "5th of February" -> "5 February")
+        # Handle variations: "of", "Of", "OF" with any whitespace
+        date_string = re.sub(r'\s+of\s+', ' ', date_string, flags=re.IGNORECASE)
+        
+        # Pattern 1: "21 January" or "21 Jan" or "21 of January" (after removing "of")
         pattern1 = re.match(r'^(\d{1,2})\s+(\w+)(?:\s+(\d{4}))?$', date_string)
         if pattern1:
             day = int(pattern1.group(1))
