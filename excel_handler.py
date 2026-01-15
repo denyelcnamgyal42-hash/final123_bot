@@ -1570,8 +1570,9 @@ class ExcelHandler:
             return True, "Monthly logging only available for Google Sheets"
         
         try:
-            # Determine month from approved_at or check_in_date
-            date_str = booking_data.get('approved_at') or booking_data.get('check_in_date') or booking_data.get('created_at')
+            # Determine month from check_in_date (when they're booking for)
+            # This ensures bookings are saved to the month they're staying, not when approved
+            date_str = booking_data.get('check_in_date') or booking_data.get('approved_at') or booking_data.get('created_at')
             if not date_str:
                 return False, "No date found in booking data"
             
@@ -1619,11 +1620,49 @@ class ExcelHandler:
                 booking_data.get('rejection_reason', '') or ''
             ]
             
-            # Append row to sheet
-            worksheet.append_row(row_data)
+            # Get all existing rows (skip header row 1)
+            try:
+                all_rows = worksheet.get_all_values()
+                if len(all_rows) <= 1:
+                    # Only header exists, just append
+                    worksheet.append_row(row_data)
+                else:
+                    # Get data rows (skip header)
+                    data_rows = all_rows[1:]
+                    
+                    # Parse check-in date for new booking
+                    new_check_in = booking_data.get('check_in_date', '')
+                    
+                    # Find insertion position (sorted by check-in date, column D = index 3)
+                    insert_index = len(data_rows)  # Default: append at end
+                    for i, existing_row in enumerate(data_rows):
+                        if len(existing_row) > 3:
+                            existing_check_in = existing_row[3]  # Check-in date is column D (index 3)
+                            if existing_check_in and new_check_in:
+                                try:
+                                    # Compare dates
+                                    existing_date = datetime.strptime(existing_check_in, '%Y-%m-%d')
+                                    new_date = datetime.strptime(new_check_in, '%Y-%m-%d')
+                                    if new_date < existing_date:
+                                        insert_index = i
+                                        break
+                                except:
+                                    # If date parsing fails, compare as strings
+                                    if new_check_in < existing_check_in:
+                                        insert_index = i
+                                        break
+                    
+                    # Insert at the correct position (row number = insert_index + 2, because row 1 is header)
+                    worksheet.insert_row(row_data, insert_index + 2)
+                    
+                    logger.info(f"✅ Inserted booking {booking_data.get('booking_id')} at position {insert_index + 2} (sorted by check-in date)")
+            except Exception as e:
+                # Fallback: just append if sorting fails
+                logger.warning(f"Could not sort bookings, appending to end: {e}")
+                worksheet.append_row(row_data)
             
             logger.info(f"✅ Logged booking {booking_data.get('booking_id')} to {month_name}_bookings sheet")
-            return True, f"Booking logged to {month_name}_bookings sheet"
+            return True, f"Booking logged to {month_name}_bookings sheet (sorted by check-in date)"
             
         except Exception as e:
             logger.error(f"Error logging booking to monthly sheet: {e}", exc_info=True)
