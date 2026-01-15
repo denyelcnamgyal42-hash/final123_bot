@@ -24,12 +24,14 @@ try:
         logger.info(f"   Credentials: {config.GOOGLE_SHEETS_CREDENTIALS_PATH}")
         logger.info(f"   Worksheet name: {config.HOTELS_SHEET}")
         
-        # Check if credentials file exists
+        # Check if credentials file exists (it may have been created from CREDENTIALS_JSON)
         import os
         if not os.path.exists(config.GOOGLE_SHEETS_CREDENTIALS_PATH):
             raise FileNotFoundError(
                 f"Credentials file not found at: {config.GOOGLE_SHEETS_CREDENTIALS_PATH}\n"
-                f"Please check the GOOGLE_SHEETS_CREDENTIALS_PATH in your .env file."
+                f"Please either:\n"
+                f"1. Set CREDENTIALS_JSON environment variable with your credentials.json content, OR\n"
+                f"2. Upload credentials.json file and set GOOGLE_SHEETS_CREDENTIALS_PATH"
             )
         
         excel_handler = ExcelHandler(

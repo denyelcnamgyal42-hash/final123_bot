@@ -43,7 +43,8 @@ Add these in Render Dashboard → Your Service → Environment:
 - `DASHBOARD_AUTH_TOKEN` - Secure token for dashboard access (create a secure random string)
 
 ### Optional
-- `GOOGLE_SHEETS_CREDENTIALS_PATH` - Path to credentials.json (default: `credentials.json`)
+- `CREDENTIALS_JSON` - **Recommended**: Paste your entire credentials.json content here (easier than uploading files)
+- `GOOGLE_SHEETS_CREDENTIALS_PATH` - Path to credentials.json file (default: `credentials.json`, only needed if not using CREDENTIALS_JSON)
 - `CONTACT_PHONE_NUMBER` - Contact phone for group bookings (default: `975-17892899`)
 - `MODEL_NAME` - OpenAI model (default: `gpt-4o-mini`)
 - `DASHBOARD_PORT` - Dashboard port (default: `5001`)
@@ -53,15 +54,34 @@ Add these in Render Dashboard → Your Service → Environment:
 
 You have two options:
 
-### Option 1: Upload credentials.json
-1. Upload `credentials.json` to your Render service
-2. Set `GOOGLE_SHEETS_CREDENTIALS_PATH` to the file path
+### Option 1: Use CREDENTIALS_JSON Environment Variable (Recommended for Render)
 
-### Option 2: Use Environment Variables
-1. Convert your `credentials.json` to environment variables
-2. Create the file at runtime (not recommended for security)
+1. Open your `credentials.json` file
+2. Copy the **entire JSON content** (all of it, including braces)
+3. In Render Dashboard → Your Service → Environment:
+   - Add new environment variable: `CREDENTIALS_JSON`
+   - Paste the entire JSON content as the value
+   - Save
+4. The service will automatically create `credentials.json` from this on startup
+5. No need to upload any files!
 
-**Recommended**: Use Option 1 and ensure the file is in your repository (or use Render's file upload feature).
+**Example**: If your credentials.json looks like:
+```json
+{
+  "type": "service_account",
+  "project_id": "your-project",
+  ...
+}
+```
+
+Just paste the entire JSON (including the outer braces) into the `CREDENTIALS_JSON` environment variable.
+
+### Option 2: Upload credentials.json File
+
+1. Upload `credentials.json` to your Render service (via Shell or commit to repo)
+2. Set `GOOGLE_SHEETS_CREDENTIALS_PATH` to the file path (default: `credentials.json`)
+
+**Recommended**: Use Option 1 - it's easier and more secure on Render.
 
 ## Important Notes
 

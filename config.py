@@ -17,8 +17,25 @@ WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "").strip()
 WHATSAPP_API_URL = f"https://graph.facebook.com/v18.0/{WHATSAPP_PHONE_NUMBER_ID}/messages" if WHATSAPP_PHONE_NUMBER_ID else ""
 
 # Google Sheets Configuration
+# Support for CREDENTIALS_JSON environment variable (for Render deployment)
+CREDENTIALS_JSON = os.getenv("CREDENTIALS_JSON", "").strip()
 GOOGLE_SHEETS_CREDENTIALS_PATH = os.getenv("GOOGLE_SHEETS_CREDENTIALS_PATH", "credentials.json")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
+
+# If CREDENTIALS_JSON is provided, create credentials.json file from it
+if CREDENTIALS_JSON and not os.path.exists(GOOGLE_SHEETS_CREDENTIALS_PATH):
+    try:
+        import json
+        # Validate it's valid JSON
+        credentials_data = json.loads(CREDENTIALS_JSON)
+        # Write to file
+        with open(GOOGLE_SHEETS_CREDENTIALS_PATH, 'w') as f:
+            json.dump(credentials_data, f, indent=2)
+        print(f"✅ Created credentials.json from CREDENTIALS_JSON environment variable")
+    except json.JSONDecodeError as e:
+        print(f"⚠️ Warning: CREDENTIALS_JSON is not valid JSON: {e}")
+    except Exception as e:
+        print(f"⚠️ Warning: Failed to create credentials.json from CREDENTIALS_JSON: {e}")
 
 # Excel Configuration (if not using Google Sheets)
 EXCEL_PATH = os.getenv("EXCEL_PATH", "hotel_availability.xlsx")
