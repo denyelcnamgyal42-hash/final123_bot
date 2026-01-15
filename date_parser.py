@@ -69,14 +69,53 @@ class DateParser:
             day_after = reference_date + timedelta(days=2)
             return day_after.strftime('%Y-%m-%d'), None
         
-        # Handle "next [day]" format
-        next_day_match = re.match(r'next\s+(\w+)', date_string)
-        if next_day_match:
-            day_name = next_day_match.group(1)
+        # Handle weekend expressions
+        weekend_patterns = [
+            r'^(coming|this|next)\s+weekend$',
+            r'^the\s+(coming|following|next)\s+weekend$',
+            r'^weekend$'  # Just "weekend" means coming weekend
+        ]
+        for pattern in weekend_patterns:
+            if re.match(pattern, date_string, re.IGNORECASE):
+                # Weekend = Saturday (day 5)
+                current_weekday = reference_date.weekday()
+                days_until_saturday = (5 - current_weekday) % 7
+                if days_until_saturday == 0:
+                    # Today is Saturday, use next Saturday
+                    days_until_saturday = 7
+                elif "following" in date_string.lower():
+                    # "following weekend" = weekend after next
+                    days_until_saturday += 7
+                target_date = reference_date + timedelta(days=days_until_saturday)
+                return target_date.strftime('%Y-%m-%d'), None
+        
+        # Handle "coming [day]" or "this [day]" format
+        coming_day_match = re.match(r'(coming|this)\s+(\w+)', date_string, re.IGNORECASE)
+        if coming_day_match:
+            day_name = coming_day_match.group(2).lower()
             if day_name in DateParser.DAY_NAMES:
                 target_weekday = DateParser.DAY_NAMES[day_name]
-                days_ahead = target_weekday - reference_date.weekday()
+                current_weekday = reference_date.weekday()
+                days_ahead = target_weekday - current_weekday
+                if days_ahead < 0:  # Day has passed this week, get next week
+                    days_ahead += 7
+                elif days_ahead == 0:  # Today is that day, get next week
+                    days_ahead = 7
+                target_date = reference_date + timedelta(days=days_ahead)
+                return target_date.strftime('%Y-%m-%d'), None
+        
+        # Handle "next [day]" format
+        next_day_match = re.match(r'next\s+(\w+)', date_string, re.IGNORECASE)
+        if next_day_match:
+            day_name = next_day_match.group(1).lower()
+            if day_name in DateParser.DAY_NAMES:
+                target_weekday = DateParser.DAY_NAMES[day_name]
+                current_weekday = reference_date.weekday()
+                days_ahead = target_weekday - current_weekday
                 if days_ahead <= 0:  # If day has passed this week, get next week
+                    days_ahead += 7
+                else:
+                    # "next [day]" means the one after this week's occurrence
                     days_ahead += 7
                 target_date = reference_date + timedelta(days=days_ahead)
                 return target_date.strftime('%Y-%m-%d'), None
@@ -99,16 +138,30 @@ class DateParser:
                 month = DateParser.MONTH_NAMES[month_str]
                 try:
                     parsed_date = datetime(year, month, day)
-                    # Only reject if the date is explicitly in the past year
-                    # If same year but past, allow it (user might be referring to next year)
-                    if parsed_date.date() < reference_date.date() and year < reference_date.year:
-                        return None, "That date has already passed. Please provide another date."
-                    # If same year but past month/day, check if it's clearly in the past
-                    if parsed_date.date() < reference_date.date() and year == reference_date.year:
-                        # Only reject if it's more than 30 days in the past (likely a mistake)
-                        days_diff = (reference_date.date() - parsed_date.date()).days
-                        if days_diff > 30:
+                    # Reject if date is in the past
+                    if parsed_date.date() < reference_date.date():
+                        # If it's a different year (past year), always reject
+                        if year < reference_date.year:
                             return None, "That date has already passed. Please provide another date."
+                        # If same year but past date, check if it's in the same month
+                        # If same month and past, reject (e.g., "1 jan" on Jan 15 = Jan 1 has passed)
+                        if year == reference_date.year:
+                            if month == reference_date.month:
+                                # Same month, past date - definitely reject
+                                return None, "That date has already passed. Please provide another date."
+                            else:
+                                # Different month, past - likely means next year
+                                # But if it's way in the past (more than 6 months), probably a mistake
+                                months_diff = (reference_date.month - month) % 12
+                                if months_diff > 6:
+                                    return None, "That date has already passed. Please provide another date."
+                                # If less than 6 months past, assume they mean next year
+                                year += 1
+                                try:
+                                    parsed_date = datetime(year, month, day)
+                                    return parsed_date.strftime('%Y-%m-%d'), None
+                                except ValueError:
+                                    return None, "Invalid date. Please provide a valid date."
                     return parsed_date.strftime('%Y-%m-%d'), None
                 except ValueError:
                     return None, "Invalid date. Please provide a valid date."
@@ -124,16 +177,30 @@ class DateParser:
                 month = DateParser.MONTH_NAMES[month_str]
                 try:
                     parsed_date = datetime(year, month, day)
-                    # Only reject if the date is explicitly in the past year
-                    # If same year but past, allow it (user might be referring to next year)
-                    if parsed_date.date() < reference_date.date() and year < reference_date.year:
-                        return None, "That date has already passed. Please provide another date."
-                    # If same year but past month/day, check if it's clearly in the past
-                    if parsed_date.date() < reference_date.date() and year == reference_date.year:
-                        # Only reject if it's more than 30 days in the past (likely a mistake)
-                        days_diff = (reference_date.date() - parsed_date.date()).days
-                        if days_diff > 30:
+                    # Reject if date is in the past
+                    if parsed_date.date() < reference_date.date():
+                        # If it's a different year (past year), always reject
+                        if year < reference_date.year:
                             return None, "That date has already passed. Please provide another date."
+                        # If same year but past date, check if it's in the same month
+                        # If same month and past, reject (e.g., "1 jan" on Jan 15 = Jan 1 has passed)
+                        if year == reference_date.year:
+                            if month == reference_date.month:
+                                # Same month, past date - definitely reject
+                                return None, "That date has already passed. Please provide another date."
+                            else:
+                                # Different month, past - likely means next year
+                                # But if it's way in the past (more than 6 months), probably a mistake
+                                months_diff = (reference_date.month - month) % 12
+                                if months_diff > 6:
+                                    return None, "That date has already passed. Please provide another date."
+                                # If less than 6 months past, assume they mean next year
+                                year += 1
+                                try:
+                                    parsed_date = datetime(year, month, day)
+                                    return parsed_date.strftime('%Y-%m-%d'), None
+                                except ValueError:
+                                    return None, "Invalid date. Please provide a valid date."
                     return parsed_date.strftime('%Y-%m-%d'), None
                 except ValueError:
                     return None, "Invalid date. Please provide a valid date."

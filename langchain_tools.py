@@ -79,7 +79,8 @@ def parse_date(date_string: str) -> Dict[str, Any]:
     - "Jan 21", "21 Jan"
     - "27" (assumes current month)
     - "tomorrow", "day after tomorrow"
-    - "next Friday"
+    - "next Friday", "coming Monday", "this Sunday"
+    - "coming weekend", "next weekend", "the following weekend"
     - "21/01/2024", "21-01-2024"
     
     Args:
