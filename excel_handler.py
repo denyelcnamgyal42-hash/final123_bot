@@ -2171,11 +2171,39 @@ class ExcelHandler:
                                     pass
                             
                             if should_clear:
-                                # Clear the cell
+                                # Clear the cell value and note
                                 self._rate_limit_api_call()
                                 try:
+                                    # Clear cell value
                                     self.sheet.update_cell(row_num, col_num, '')
                                     self._reset_429_backoff()
+                                    
+                                    # Clear cell note/comment using batch_update
+                                    try:
+                                        sheet_id = self.sheet.id
+                                        note_request = {
+                                            "requests": [{
+                                                "updateCells": {
+                                                    "range": {
+                                                        "sheetId": sheet_id,
+                                                        "startRowIndex": row_num - 1,
+                                                        "endRowIndex": row_num,
+                                                        "startColumnIndex": col_num - 1,
+                                                        "endColumnIndex": col_num
+                                                    },
+                                                    "rows": [{
+                                                        "values": [{
+                                                            "note": ""  # Empty note to clear it
+                                                        }]
+                                                    }],
+                                                    "fields": "note"
+                                                }
+                                            }]
+                                        }
+                                        self._spreadsheet.batch_update(note_request)
+                                        logger.debug(f"Cleared note from cell row {row_num}, col {col_num}")
+                                    except Exception as note_error:
+                                        logger.warning(f"Could not clear note from cell: {note_error}")
                                     
                                     # Invalidate cache
                                     if cache_key in self._row_data_cache:
