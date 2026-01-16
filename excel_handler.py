@@ -1605,44 +1605,80 @@ class ExcelHandler:
                 
                 logger.info(f"🔍 Checking {len(columns_to_check)} columns for available rooms on {date_str}: {columns_to_check}")
                 
+                # Batch read the entire row once (much more efficient than reading cells one by one)
+                cache_key = f"row_{row_num}"
+                current_time = time.time()
+                row_data = None
+                
+                # Try to use cached row data first
+                if cache_key in self._row_data_cache:
+                    cached_data, cache_time = self._row_data_cache[cache_key]
+                    if (current_time - cache_time) < self._row_cache_ttl:
+                        row_data = cached_data
+                        logger.debug(f"Using cached row data for row {row_num}")
+                
+                # If not in cache or expired, batch read the entire row in one API call
+                if row_data is None:
+                    # Read entire row (from column 1 to max_col_to_check) in one batch call
+                    def col_num_to_letter(n):
+                        result = ""
+                        while n > 0:
+                            n -= 1
+                            result = chr(65 + (n % 26)) + result
+                            n //= 26
+                        return result
+                    
+                    max_col_letter = col_num_to_letter(max_col_to_check)
+                    range_name = f'A{row_num}:{max_col_letter}{row_num}'
+                    
+                    self._rate_limit_api_call()
+                    try:
+                        # Get row values - this returns a 2D array with one row
+                        row_values = self.sheet.get(range_name)
+                        if row_values and len(row_values) > 0:
+                            row_data = row_values[0]  # First (and only) row
+                        else:
+                            row_data = []
+                        self._reset_429_backoff()
+                        
+                        # Cache the result
+                        self._row_data_cache[cache_key] = (row_data, current_time)
+                        logger.debug(f"Cached row data for row {row_num} ({len(row_data)} columns)")
+                    except Exception as e2:
+                        error_str = str(e2).lower()
+                        if '429' in error_str or 'quota' in error_str:
+                            self._handle_429_error(e2)
+                        logger.error(f"Error reading row {row_num}: {e2}")
+                        row_data = []  # Fallback to empty list
+                
                 # Find available rooms (blank cells) starting from determined start_col
                 # Only check columns that have room types defined
                 for col_num in columns_to_check:
                     if rooms_booked_for_date >= num_rooms:
                         break
                     
-                    if col_num < start_col or col_num > max_col_to_check:
+                    if col_num < start_col:
+                        logger.debug(f"Skipping column {col_num} - before start_col {start_col}")
+                        continue
+                    
+                    if col_num > max_col_to_check:
+                        logger.debug(f"Skipping column {col_num} - exceeds max_col {max_col_to_check}")
                         continue
                     
                     # Only fill columns that have room types
                     if col_num not in room_types:
+                        logger.debug(f"Skipping column {col_num} - not in room_types")
                         continue
                     
                     try:
-                        # Try to use cached row data first
-                        cache_key = f"row_{row_num}"
-                        current_time = time.time()
-                        cell_value = None
+                        # Get cell value from batch-read row data (col_num is 1-based, array is 0-based)
+                        col_index = col_num - 1
+                        if col_index < len(row_data):
+                            cell_value = row_data[col_index]
+                        else:
+                            cell_value = None
                         
-                        if cache_key in self._row_data_cache:
-                            cached_data, cache_time = self._row_data_cache[cache_key]
-                            if (current_time - cache_time) < self._row_cache_ttl:
-                                # Use cached data
-                                col_index = col_num - 1
-                                if col_index < len(cached_data):
-                                    cell_value = cached_data[col_index]
-                        
-                        # If not in cache or expired, read from sheet
-                        if cell_value is None:
-                            self._rate_limit_api_call()
-                            try:
-                                cell_value = self.sheet.cell(row_num, col_num).value
-                                self._reset_429_backoff()
-                            except Exception as e2:
-                                error_str = str(e2).lower()
-                                if '429' in error_str or 'quota' in error_str:
-                                    self._handle_429_error(e2)
-                                raise
+                        logger.debug(f"Row {row_num}, Col {col_num} ({room_types.get(col_num)}): value='{cell_value}' (type: {type(cell_value).__name__ if cell_value is not None else 'None'})")
                         
                         # Check if cell is empty (handle None, empty string, whitespace, 0)
                         is_empty = (cell_value is None or 

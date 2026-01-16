@@ -570,6 +570,8 @@ class BookingManager:
     
     def get_customer_bookings(self, phone_number: str) -> List[BookingRequest]:
         """Get all bookings for a customer."""
+        # Reload bookings from file to ensure we have the latest data
+        self._load_bookings()
         with self.lock:
             return [b for b in self.bookings.values() 
                    if b.phone_number == phone_number]
