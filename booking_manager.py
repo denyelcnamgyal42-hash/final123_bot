@@ -49,6 +49,8 @@ class BookingRequest:
     approved_at: str = None
     rejected_at: str = None
     rejection_reason: str = None
+    cancelled_at: str = None
+    cancellation_reason: str = None
     
     def __post_init__(self):
         if self.created_at is None:
@@ -261,8 +263,8 @@ class BookingManager:
                             booking.approved_at or '',
                             booking.rejected_at or '',
                             booking.rejection_reason or '',
-                            booking.cancelled_at or '',
-                            booking.cancellation_reason or ''
+                            getattr(booking, 'cancelled_at', None) or '',
+                            getattr(booking, 'cancellation_reason', None) or ''
                         ]
                         booking_rows.append((booking.booking_id, row_data))
                 
