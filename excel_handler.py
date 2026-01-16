@@ -1546,21 +1546,33 @@ class ExcelHandler:
             
             # Get room types to only update columns with valid room types
             room_types = self._get_room_types_google()
+            logger.info(f"📋 Available room types in sheet: {dict(room_types)}")
+            
+            if not room_types:
+                return False, "No room types found in sheet. Please check that room type headers are set correctly."
             
             # If room type preference is specified, find matching columns
             preferred_columns = []
             if room_type_preference:
                 room_type_lower = room_type_preference.strip().lower()
+                logger.info(f"🔍 Looking for room type '{room_type_preference}' (normalized: '{room_type_lower}')")
                 for col_num, room_type in room_types.items():
                     room_type_str = str(room_type).lower()
-                    # Match room type (handle variations)
-                    if (room_type_lower in room_type_str or 
-                        room_type_str in room_type_lower or
+                    # Match room type (handle variations) - improved fuzzy matching
+                    if (room_type_lower == room_type_str or  # Exact match
+                        room_type_lower in room_type_str or  # Partial match (e.g., "villa" in "Two Bedroom Villa")
+                        room_type_str in room_type_lower or  # Reverse partial match
                         (room_type_lower == "double" and "double" in room_type_str) or
                         (room_type_lower == "twin" and "twin" in room_type_str) or
-                        ("villa" in room_type_lower and "villa" in room_type_str)):
+                        ("villa" in room_type_lower and "villa" in room_type_str) or
+                        ("suite" in room_type_lower and "suite" in room_type_str)):
                         preferred_columns.append(col_num)
+                        logger.debug(f"✅ Matched '{room_type_preference}' to column {col_num} ('{room_type}')")
                 logger.info(f"Found {len(preferred_columns)} columns matching room type '{room_type_preference}': {preferred_columns}")
+            
+            # If no preferred columns found but room type was specified, log warning and use all available
+            if room_type_preference and not preferred_columns:
+                logger.warning(f"⚠️  No columns found matching room type '{room_type_preference}'. Available room types: {list(room_types.values())}. Will try to book from all available room types.")
             
             # Track rooms booked per date
             total_rooms_booked = 0
@@ -1583,8 +1595,12 @@ class ExcelHandler:
                 # Ensure we have enough columns
                 max_col_to_check = max(start_col + 20, len(row_data) if row_data else start_col + 20)
                 
-                # If we have preferred columns, use those first
+                # If we have preferred columns, use those first; otherwise use all available room types
                 columns_to_check = preferred_columns if preferred_columns else sorted(room_types.keys())
+                
+                if not columns_to_check:
+                    logger.error(f"❌ No room type columns found in sheet! Cannot book rooms.")
+                    continue
                 
                 # Find available rooms (blank cells) starting from determined start_col
                 # Only check columns that have room types defined
