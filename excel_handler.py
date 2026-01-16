@@ -72,6 +72,11 @@ class ExcelHandler:
         self._row_data_cache = {}  # Cache row data by row number
         self._row_cache_ttl = 60  # Cache rows for 1 minute
         
+        # Room configuration cache (max guests per room type)
+        self._room_config_cache = None
+        self._room_config_cache_time = 0
+        self._room_config_cache_ttl = 3600  # Cache for 1 hour
+        
         # Rate limiting
         self._last_api_call_time = 0
         self._min_api_interval = 0.1  # Minimum 100ms between API calls
@@ -517,12 +522,26 @@ class ExcelHandler:
             if room_type:
                 room_type_normalized = room_type.strip().lower()
                 requested_type_available = 0
+                matched_room_type = None
                 
-                # Find matching room type (case-insensitive)
+                # Find matching room type (fuzzy matching - partial match)
                 for rtype, count in room_types_dict.items():
-                    if rtype.lower() == room_type_normalized:
+                    rtype_lower = rtype.lower()
+                    # Exact match
+                    if rtype_lower == room_type_normalized:
                         requested_type_available = count
+                        matched_room_type = rtype
                         break
+                    # Partial match (e.g., "villa" matches "Two Bedroom Villa", "Villa")
+                    elif room_type_normalized in rtype_lower or rtype_lower in room_type_normalized:
+                        # Prefer longer matches (more specific)
+                        if not matched_room_type or len(rtype) > len(matched_room_type):
+                            requested_type_available = count
+                            matched_room_type = rtype
+                
+                # If we found a match, use the actual room type name from the sheet
+                if matched_room_type:
+                    return True, f"{requested_type_available} {matched_room_type} room(s) available on that date.", requested_type_available, {matched_room_type: requested_type_available}
                 
                 if requested_type_available > 0:
                     return True, f"{requested_type_available} {room_type} room(s) available on that date.", requested_type_available, {room_type: requested_type_available}
@@ -589,21 +608,39 @@ class ExcelHandler:
             else:
                 room_types_map = self._get_room_types_excel()
             
-            # If room type is specified, filter to only that type
+            # If room type is specified, filter to only that type (with fuzzy matching)
             if room_type:
                 room_type_normalized = room_type.strip().lower()
                 filtered_room_types = {}
+                matched_room_type_name = None
+                
                 for col_idx, rtype in room_types_map.items():
-                    if rtype.lower() == room_type_normalized:
+                    rtype_lower = rtype.lower()
+                    # Exact match
+                    if rtype_lower == room_type_normalized:
                         filtered_room_types[col_idx] = rtype
+                        if not matched_room_type_name:
+                            matched_room_type_name = rtype
+                    # Partial match (e.g., "villa" matches "Two Bedroom Villa", "Villa")
+                    elif room_type_normalized in rtype_lower or rtype_lower in room_type_normalized:
+                        filtered_room_types[col_idx] = rtype
+                        # Prefer longer matches (more specific)
+                        if not matched_room_type_name or len(rtype) > len(matched_room_type_name):
+                            matched_room_type_name = rtype
+                
                 if not filtered_room_types:
                     # Room type doesn't exist
                     all_types = set(rt.lower() for rt in room_types_map.values())
-                    if room_type_normalized in all_types:
+                    # Check for partial matches in all types
+                    found_partial = any(room_type_normalized in rt or rt in room_type_normalized for rt in all_types)
+                    if found_partial:
                         return False, f"Sorry, no {room_type} rooms are available for the full stay.", 0, {}
                     else:
                         return False, f"Sorry, we don't have {room_type} rooms.", 0, {}
                 room_types_map = filtered_room_types
+                # Update room_type to the matched name for consistent messaging
+                if matched_room_type_name:
+                    room_type = matched_room_type_name
             
             # For each room column, check if it's available on ALL dates
             # Track which columns are available for all dates
@@ -798,6 +835,112 @@ class ExcelHandler:
         except Exception as e:
             logger.error(f"Error checking availability range: {e}")
             return False, f"Error checking availability: {str(e)}", 0, {}
+    
+    def get_room_config(self) -> Dict[str, int]:
+        """
+        Get room configuration (max guests per room type) from a 'room_config' sheet.
+        Falls back to config.py defaults if sheet doesn't exist.
+        
+        Returns:
+            Dictionary mapping room type names (normalized) to max guests
+            Example: {"two bedroom villa": 4, "twin": 2, "double": 2}
+        """
+        current_time = time.time()
+        
+        # Check cache
+        if (self._room_config_cache is not None and 
+            current_time - self._room_config_cache_time < self._room_config_cache_ttl):
+            return self._room_config_cache
+        
+        config = {}
+        
+        # Try to load from config sheet
+        try:
+            if self.use_google_sheets and self._spreadsheet:
+                try:
+                    config_sheet = self._spreadsheet.worksheet("room_config")
+                    # Read all rows (skip header)
+                    rows = config_sheet.get_all_values()
+                    if len(rows) > 1:  # Has header + data
+                        for row in rows[1:]:
+                            if len(row) >= 2 and row[0] and row[1]:
+                                room_type = row[0].strip()
+                                try:
+                                    max_guests = int(row[1].strip())
+                                    # Normalize room type name for matching
+                                    config[room_type.lower()] = max_guests
+                                    logger.debug(f"Loaded room config: {room_type} = {max_guests} guests")
+                                except ValueError:
+                                    logger.warning(f"Invalid max guests value for {room_type}: {row[1]}")
+                    logger.info(f"✅ Loaded {len(config)} room configurations from room_config sheet")
+                except WorksheetNotFound:
+                    logger.info("ℹ️  No 'room_config' sheet found, using defaults from config.py")
+                except Exception as e:
+                    logger.warning(f"Could not read room_config sheet: {e}, using defaults")
+            elif self.excel_path and OPENPYXL_AVAILABLE:
+                try:
+                    wb = load_workbook(self.excel_path, read_only=True)
+                    if "room_config" in wb.sheetnames:
+                        ws = wb["room_config"]
+                        # Read rows (skip header)
+                        for row in ws.iter_rows(min_row=2, values_only=True):
+                            if row[0] and row[1]:
+                                room_type = str(row[0]).strip()
+                                try:
+                                    max_guests = int(row[1])
+                                    config[room_type.lower()] = max_guests
+                                    logger.debug(f"Loaded room config: {room_type} = {max_guests} guests")
+                                except (ValueError, TypeError):
+                                    logger.warning(f"Invalid max guests value for {room_type}: {row[1]}")
+                        logger.info(f"✅ Loaded {len(config)} room configurations from room_config sheet")
+                    wb.close()
+                except Exception as e:
+                    logger.warning(f"Could not read room_config sheet: {e}, using defaults")
+        except Exception as e:
+            logger.warning(f"Error loading room config: {e}, using defaults")
+        
+        # Fallback to config.py defaults if no config found
+        if not config:
+            import config as app_config
+            config = {
+                "two bedroom villa": getattr(app_config, 'TWO_BEDROOM_VILLA_MAX_GUEST', 4),
+                "twin": getattr(app_config, 'TWIN_MAX_GUEST', 2),
+                "double": getattr(app_config, 'DOUBLE_ROOM_MAX_GUEST', 2),
+            }
+            logger.info("ℹ️  Using default room configurations from config.py")
+        
+        # Cache the result
+        self._room_config_cache = config
+        self._room_config_cache_time = current_time
+        
+        return config
+    
+    def get_max_guests_for_room_type(self, room_type: str) -> Optional[int]:
+        """
+        Get max guests for a specific room type using fuzzy matching.
+        
+        Args:
+            room_type: Room type name (e.g., "Villa", "Two Bedroom Villa", "Twin")
+            
+        Returns:
+            Max guests for the room type, or None if not found
+        """
+        if not room_type:
+            return None
+        
+        config = self.get_room_config()
+        room_type_normalized = room_type.strip().lower()
+        
+        # Try exact match first
+        if room_type_normalized in config:
+            return config[room_type_normalized]
+        
+        # Try partial match (e.g., "villa" matches "two bedroom villa")
+        for config_room_type, max_guests in config.items():
+            if room_type_normalized in config_room_type or config_room_type in room_type_normalized:
+                return max_guests
+        
+        return None
     
     def _get_room_types_excel(self) -> Dict[int, str]:
         """

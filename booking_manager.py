@@ -300,6 +300,14 @@ class BookingManager:
                 logger.info(f"✅ Saved {len(booking_rows)} bookings to Google Sheets")
             except Exception as e:
                 logger.error(f"❌ Error saving bookings to Google Sheets: {e}", exc_info=True)
+                # If save fails, try to reload and retry once
+                try:
+                    logger.info("🔄 Attempting to reload bookings sheet and retry save...")
+                    self._init_google_sheets()
+                    # Retry save
+                    self._save_bookings()
+                except Exception as retry_error:
+                    logger.error(f"❌ Retry save also failed: {retry_error}", exc_info=True)
         else:
             # Fallback to JSON file
             with self.lock:
@@ -401,13 +409,22 @@ class BookingManager:
             room_type_lower = room_type_preference.strip().lower()
             max_guests_per_room = None
             
-            # Determine max guests based on room type
-            if "two bedroom villa" in room_type_lower or "two-bedroom villa" in room_type_lower or "villa" in room_type_lower:
-                max_guests_per_room = config.TWO_BEDROOM_VILLA_MAX_GUEST
-            elif "twin" in room_type_lower:
-                max_guests_per_room = config.TWIN_MAX_GUEST
-            elif "double" in room_type_lower:
-                max_guests_per_room = config.DOUBLE_ROOM_MAX_GUEST
+            # Try to get max guests from Excel/Google Sheets config first
+            try:
+                from langchain_tools import excel_handler
+                if excel_handler:
+                    max_guests_per_room = excel_handler.get_max_guests_for_room_type(room_type_preference)
+            except Exception as e:
+                logger.debug(f"Could not get max guests from Excel config: {e}")
+            
+            # Fallback to config.py defaults if not found in Excel
+            if max_guests_per_room is None:
+                if "two bedroom villa" in room_type_lower or "two-bedroom villa" in room_type_lower or "villa" in room_type_lower:
+                    max_guests_per_room = config.TWO_BEDROOM_VILLA_MAX_GUEST
+                elif "twin" in room_type_lower:
+                    max_guests_per_room = config.TWIN_MAX_GUEST
+                elif "double" in room_type_lower:
+                    max_guests_per_room = config.DOUBLE_ROOM_MAX_GUEST
             
             # If we found a max guest limit, validate
             if max_guests_per_room:
@@ -437,8 +454,15 @@ class BookingManager:
         with self.lock:
             self.bookings[booking_id] = booking
         
-        self._save_bookings()
-        logger.info(f"Created booking request: {booking_id}")
+        # Save to Google Sheets/JSON with error handling
+        try:
+            self._save_bookings()
+            logger.info(f"✅ Created and saved booking request: {booking_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to save booking {booking_id} to storage: {e}", exc_info=True)
+            # Still return the booking even if save failed (it's in memory)
+            # The booking will be lost on restart, but at least the user gets a response
+            logger.warning(f"⚠️  Booking {booking_id} is in memory but not persisted. Check Google Sheets connection.")
         
         return booking
     
