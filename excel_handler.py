@@ -1577,9 +1577,9 @@ class ExcelHandler:
             # Track rooms booked per date
             total_rooms_booked = 0
             dates_updated = 0
-            room_index = 0  # Track which room in the distribution we're on (for multi-room bookings)
             
             for date_str in dates:
+                room_index = 0  # Reset room index for each date (same rooms get same guests each night)
                 row_num = self.find_date_row(date_str)
                 if row_num is None:
                     logger.warning(f"Date row not found for {date_str}, skipping")
@@ -1690,7 +1690,8 @@ class ExcelHandler:
                         # Only fill blank cells (never overwrite)
                         if is_empty:
                             # Get guests for this specific room from distribution
-                            guests_for_this_room = guests_distribution[room_index] if room_index < len(guests_distribution) else base_guests_per_room
+                            # Use modulo to cycle through distribution for each date (same rooms get same guests each night)
+                            guests_for_this_room = guests_distribution[room_index % len(guests_distribution)] if guests_distribution else base_guests_per_room
                             
                             # Update cell with guests for this specific room
                             self._rate_limit_api_call()
