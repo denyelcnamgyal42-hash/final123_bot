@@ -271,7 +271,7 @@ def create_booking_request(customer_name: str, phone_number: str,
         return {
             "success": True,
             "booking_id": booking.booking_id,
-            "message": f"Your booking request has been submitted. Booking ID: {booking.booking_id}. Our staff will contact you shortly to confirm."
+            "message": f"✅ Perfect! Your booking request has been submitted successfully.\n\n📋 Booking ID: {booking.booking_id}\n\nOur team will review your request and contact you shortly to confirm your booking. We look forward to hosting you! 😊"
         }
     except ValueError as e:
         # Validation errors (max rooms, max guests, etc.)

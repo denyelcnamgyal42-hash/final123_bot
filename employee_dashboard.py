@@ -6,8 +6,20 @@ import logging
 from booking_manager import BookingManager, BookingStatus
 from excel_handler import ExcelHandler
 import config
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+# Import WhatsApp message sending function
+try:
+    from whatsapp_webhook import send_whatsapp_message
+    WHATSAPP_AVAILABLE = True
+except ImportError:
+    logger.warning("WhatsApp webhook module not available. Notifications will not be sent.")
+    WHATSAPP_AVAILABLE = False
+    def send_whatsapp_message(phone_number: str, message: str, message_id: str = None):
+        logger.warning(f"Would send WhatsApp message to {phone_number}: {message}")
+        return None
 
 app = Flask(__name__)
 booking_manager = BookingManager()
@@ -296,6 +308,40 @@ def approve_booking(booking_id: str):
             else:
                 logger.info(f"Booking logged to monthly sheet: {log_message}")
         
+        # Send WhatsApp notification to customer
+        if WHATSAPP_AVAILABLE:
+            try:
+                # Format dates nicely
+                try:
+                    check_in_date = datetime.strptime(booking.check_in_date, '%Y-%m-%d')
+                    formatted_check_in = check_in_date.strftime('%B %d, %Y')  # e.g., "February 01, 2026"
+                except:
+                    formatted_check_in = booking.check_in_date
+                
+                try:
+                    check_out_date = datetime.strptime(booking.check_out_date, '%Y-%m-%d')
+                    formatted_check_out = check_out_date.strftime('%B %d, %Y')
+                except:
+                    formatted_check_out = booking.check_out_date
+                
+                message = (
+                    f"Hello {booking.customer_name},\n\n"
+                    f"Great news! Your booking request (ID: {booking.booking_id}) has been approved. "
+                    f"We're looking forward to your stay on {formatted_check_in}.\n\n"
+                    f"Booking Details:\n"
+                    f"• Check-in: {formatted_check_in}\n"
+                    f"• Check-out: {formatted_check_out}\n"
+                    f"• Rooms: {booking.num_rooms}\n"
+                    f"• Guests: {booking.num_guests}\n"
+                    f"• Room Type: {booking.room_type_preference or 'Any available'}\n\n"
+                    f"Thank you for choosing us! If you have any questions, please don't hesitate to contact us."
+                )
+                
+                send_whatsapp_message(booking.phone_number, message)
+                logger.info(f"✅ Approval notification sent to {booking.phone_number}")
+            except Exception as e:
+                logger.error(f"Failed to send approval notification: {e}")
+        
         logger.info(f"Booking {booking_id} approved and Excel updated")
         
         return jsonify({
@@ -323,6 +369,29 @@ def reject_booking(booking_id: str):
             return jsonify({"success": False, "message": message}), 400
         
         booking = booking_manager.get_booking(booking_id)
+        
+        # Send WhatsApp notification to customer
+        if WHATSAPP_AVAILABLE:
+            try:
+                notification_message = (
+                    f"Hello {booking.customer_name},\n\n"
+                    f"We're sorry to inform you that your booking request (ID: {booking.booking_id}) "
+                    f"could not be confirmed at this time."
+                )
+                
+                if reason:
+                    notification_message += f"\n\nReason: {reason}"
+                
+                notification_message += (
+                    f"\n\nWe apologize for any inconvenience. "
+                    f"If you'd like to discuss alternative dates or have any questions, "
+                    f"please feel free to contact us. We'd be happy to help you find a suitable option."
+                )
+                
+                send_whatsapp_message(booking.phone_number, notification_message)
+                logger.info(f"✅ Rejection notification sent to {booking.phone_number}")
+            except Exception as e:
+                logger.error(f"Failed to send rejection notification: {e}")
         
         return jsonify({
             "success": True,
