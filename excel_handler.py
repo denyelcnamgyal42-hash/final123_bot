@@ -1577,6 +1577,7 @@ class ExcelHandler:
             # Track rooms booked per date
             total_rooms_booked = 0
             dates_updated = 0
+            room_index = 0  # Track which room in the distribution we're on (for multi-room bookings)
             
             for date_str in dates:
                 row_num = self.find_date_row(date_str)
@@ -1601,6 +1602,8 @@ class ExcelHandler:
                 if not columns_to_check:
                     logger.error(f"❌ No room type columns found in sheet! Cannot book rooms.")
                     continue
+                
+                logger.info(f"🔍 Checking {len(columns_to_check)} columns for available rooms on {date_str}: {columns_to_check}")
                 
                 # Find available rooms (blank cells) starting from determined start_col
                 # Only check columns that have room types defined
@@ -1641,8 +1644,15 @@ class ExcelHandler:
                                     self._handle_429_error(e2)
                                 raise
                         
+                        # Check if cell is empty (handle None, empty string, whitespace, 0)
+                        is_empty = (cell_value is None or 
+                                   (isinstance(cell_value, str) and cell_value.strip() == '') or
+                                   (isinstance(cell_value, (int, float)) and cell_value == 0))
+                        
+                        logger.info(f"🔍 Row {row_num}, Col {col_num} ({room_types.get(col_num)}): value='{cell_value}' (type: {type(cell_value).__name__}), is_empty={is_empty}")
+                        
                         # Only fill blank cells (never overwrite)
-                        if cell_value is None or str(cell_value).strip() == '':
+                        if is_empty:
                             # Get guests for this specific room from distribution
                             guests_for_this_room = guests_distribution[room_index] if room_index < len(guests_distribution) else base_guests_per_room
                             
@@ -1708,7 +1718,7 @@ class ExcelHandler:
                                     self._handle_429_error(e2)
                                 raise
                     except Exception as e:
-                        logger.debug(f"Error checking/updating column {col_num}: {e}")
+                        logger.error(f"❌ Error checking/updating column {col_num} for date {date_str}: {e}", exc_info=True)
                         continue
                 
                 if rooms_booked_for_date > 0:
