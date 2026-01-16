@@ -146,7 +146,7 @@ class BookingManager:
                 
                 # Format header row
                 try:
-                    self._worksheet.format('A1:M1', {'textFormat': {'bold': True}})
+                    self._worksheet.format('A1:O1', {'textFormat': {'bold': True}})
                 except:
                     pass
                 
@@ -271,7 +271,8 @@ class BookingManager:
                     if booking_id in existing_ids:
                         # Update existing row (row number = existing_ids[booking_id] + 2, because row 1 is header)
                         row_num = existing_ids[booking_id] + 2
-                        range_name = f'A{row_num}:M{row_num}'
+                        # Update with correct range (15 columns now with cancelled fields)
+                        range_name = f'A{row_num}:O{row_num}'
                         self._worksheet.update(range_name, [row_data])
                     else:
                         # Insert new row (find correct position by check-in date for sorting)
@@ -296,9 +297,9 @@ class BookingManager:
                         # Update existing_ids for future updates
                         existing_ids[booking_id] = insert_pos - 2
                 
-                logger.debug(f"Saved {len(booking_rows)} bookings to Google Sheets")
+                logger.info(f"✅ Saved {len(booking_rows)} bookings to Google Sheets")
             except Exception as e:
-                logger.error(f"Error saving bookings to Google Sheets: {e}")
+                logger.error(f"❌ Error saving bookings to Google Sheets: {e}", exc_info=True)
         else:
             # Fallback to JSON file
             with self.lock:
