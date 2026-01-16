@@ -30,6 +30,7 @@ class BookingStatus(Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+    CANCELLED = "cancelled"
 
 
 @dataclass
@@ -130,7 +131,7 @@ class BookingManager:
                 self._worksheet = self._spreadsheet.add_worksheet(
                     title=sheet_name, 
                     rows=1000, 
-                    cols=13
+                    cols=15
                 )
                 
                 # Set header row
@@ -138,7 +139,8 @@ class BookingManager:
                     "Booking ID", "Customer Name", "Phone Number",
                     "Check-in Date", "Check-out Date", "Number of Rooms",
                     "Number of Guests", "Room Type Preference", "Status",
-                    "Created At", "Approved At", "Rejected At", "Rejection Reason"
+                    "Created At", "Approved At", "Rejected At", "Rejection Reason",
+                    "Cancelled At", "Cancellation Reason"
                 ]
                 self._worksheet.append_row(headers)
                 
@@ -191,7 +193,9 @@ class BookingManager:
                                 'created_at': row[9] if len(row) > 9 else None,
                                 'approved_at': row[10] if len(row) > 10 else None,
                                 'rejected_at': row[11] if len(row) > 11 else None,
-                                'rejection_reason': row[12] if len(row) > 12 else None
+                                'rejection_reason': row[12] if len(row) > 12 else None,
+                                'cancelled_at': row[13] if len(row) > 13 else None,
+                                'cancellation_reason': row[14] if len(row) > 14 else None
                             }
                             
                             booking = BookingRequest.from_dict(booking_data)
@@ -256,7 +260,9 @@ class BookingManager:
                             booking.created_at or '',
                             booking.approved_at or '',
                             booking.rejected_at or '',
-                            booking.rejection_reason or ''
+                            booking.rejection_reason or '',
+                            booking.cancelled_at or '',
+                            booking.cancellation_reason or ''
                         ]
                         booking_rows.append((booking.booking_id, row_data))
                 
@@ -342,7 +348,7 @@ class BookingManager:
         # Check customer booking limit (max bookings per customer)
         customer_bookings = self.get_customer_bookings(phone_number)
         
-        # Count only pending and approved bookings (rejected don't count)
+        # Count only pending and approved bookings (rejected and cancelled don't count)
         active_bookings = [b for b in customer_bookings 
                           if b.status in [BookingStatus.PENDING.value, BookingStatus.APPROVED.value]]
         
@@ -503,6 +509,37 @@ class BookingManager:
         logger.info(f"Rejected booking: {booking_id}")
         
         return True, "Booking rejected successfully."
+    
+    def cancel_booking(self, booking_id: str, reason: str = None) -> Tuple[bool, str]:
+        """
+        Cancel an approved booking.
+        
+        Args:
+            booking_id: Booking ID to cancel
+            reason: Optional cancellation reason
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        with self.lock:
+            booking = self.bookings.get(booking_id)
+            if not booking:
+                return False, "Booking not found."
+            
+            if booking.status == BookingStatus.CANCELLED.value:
+                return False, "Booking is already cancelled."
+            
+            if booking.status != BookingStatus.APPROVED.value:
+                return False, f"Only approved bookings can be cancelled. Current status: {booking.status}."
+            
+            booking.status = BookingStatus.CANCELLED.value
+            booking.cancelled_at = datetime.now().isoformat()
+            booking.cancellation_reason = reason
+        
+        self._save_bookings()
+        logger.info(f"Cancelled booking: {booking_id}")
+        
+        return True, "Booking cancelled successfully."
     
     def get_customer_bookings(self, phone_number: str) -> List[BookingRequest]:
         """Get all bookings for a customer."""

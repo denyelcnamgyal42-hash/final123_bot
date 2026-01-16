@@ -1232,7 +1232,7 @@ class ExcelHandler:
             logger.error(f"Error checking Google Sheets availability: {e}", exc_info=True)
             return False, "System temporarily unavailable.", 0, {}
     
-    def update_booking(self, check_in: str, check_out: str, num_rooms: int, num_guests: int, room_type_preference: str = None) -> Tuple[bool, str]:
+    def update_booking(self, check_in: str, check_out: str, num_rooms: int, num_guests: int, room_type_preference: str = None, booking_id: str = None, customer_name: str = None, phone_number: str = None) -> Tuple[bool, str]:
         """
         Update Excel/Google Sheet with booking after employee approval.
         Fills blank cells for the booking period.
@@ -1262,19 +1262,27 @@ class ExcelHandler:
             logger.info(f"Updating booking for {len(dates_to_update)} dates: {dates_to_update}")
             
             if self.use_google_sheets:
-                return self._update_booking_google(dates_to_update, num_rooms, num_guests, room_type_preference)
+                return self._update_booking_google(dates_to_update, num_rooms, num_guests, room_type_preference, booking_id, customer_name, phone_number)
             else:
-                return self._update_booking_excel(dates_to_update, num_rooms, num_guests, room_type_preference)
+                return self._update_booking_excel(dates_to_update, num_rooms, num_guests, room_type_preference, booking_id, customer_name, phone_number)
         except Exception as e:
             logger.error(f"Error updating booking: {e}")
             return False, f"Error updating booking: {str(e)}"
     
-    def _update_booking_excel(self, dates: List[str], num_rooms: int, num_guests: int, room_type_preference: str = None) -> Tuple[bool, str]:
+    def _update_booking_excel(self, dates: List[str], num_rooms: int, num_guests: int, room_type_preference: str = None, booking_id: str = None, customer_name: str = None, phone_number: str = None) -> Tuple[bool, str]:
         """Update booking in Excel file."""
         try:
-            # Calculate guests per room (divide total guests by number of rooms)
-            guests_per_room = num_guests // num_rooms if num_rooms > 0 else num_guests
-            logger.info(f"Booking {num_rooms} room(s) with {num_guests} total guests = {guests_per_room} guests per room")
+            # Calculate guests per room with proper distribution
+            # Distribute guests evenly, with remainder going to first rooms
+            if num_rooms > 0:
+                base_guests_per_room = num_guests // num_rooms
+                remainder = num_guests % num_rooms
+                # First 'remainder' rooms get base + 1, rest get base
+                guests_distribution = [base_guests_per_room + 1] * remainder + [base_guests_per_room] * (num_rooms - remainder)
+            else:
+                guests_distribution = [num_guests]
+            
+            logger.info(f"Booking {num_rooms} room(s) with {num_guests} total guests = Distribution: {guests_distribution}")
             
             # Get room types mapping
             room_types = self._get_room_types_excel()
@@ -1329,10 +1337,28 @@ class ExcelHandler:
                     
                     # Only fill blank cells (never overwrite)
                     if cell.value is None or str(cell.value).strip() == '':
-                        cell.value = guests_per_room
+                        # Get guests for this specific room from distribution
+                        guests_for_this_room = guests_distribution[room_index] if room_index < len(guests_distribution) else base_guests_per_room
+                        
+                        cell.value = guests_for_this_room
+                        
+                        # Add comment with booking metadata if available (Excel supports comments)
+                        if booking_id:
+                            try:
+                                from openpyxl.comments import Comment
+                                comment_text = f"Booking ID: {booking_id}"
+                                if customer_name:
+                                    comment_text += f"\nCustomer: {customer_name}"
+                                if phone_number:
+                                    comment_text += f"\nPhone: {phone_number}"
+                                cell.comment = Comment(comment_text, "Booking System")
+                            except Exception as comment_error:
+                                logger.warning(f"Could not add comment to Excel cell: {comment_error}")
+                        
                         rooms_booked_for_date += 1
                         total_rooms_booked += 1
-                        logger.info(f"Booked room in column {col_idx} ({room_types.get(col_idx)}) for date {date_str} with {guests_per_room} guests per room")
+                        room_index += 1  # Move to next room in distribution
+                        logger.info(f"Booked room in column {col_idx} ({room_types.get(col_idx)}) for date {date_str} with {guests_for_this_room} guests")
                 
                 if rooms_booked_for_date > 0:
                     dates_updated += 1
@@ -1349,12 +1375,20 @@ class ExcelHandler:
             logger.error(f"Error updating Excel booking: {e}")
             return False, f"Error updating booking: {str(e)}"
     
-    def _update_booking_google(self, dates: List[str], num_rooms: int, num_guests: int, room_type_preference: str = None) -> Tuple[bool, str]:
+    def _update_booking_google(self, dates: List[str], num_rooms: int, num_guests: int, room_type_preference: str = None, booking_id: str = None, customer_name: str = None, phone_number: str = None) -> Tuple[bool, str]:
         """Update booking in Google Sheet."""
         try:
-            # Calculate guests per room (divide total guests by number of rooms)
-            guests_per_room = num_guests // num_rooms if num_rooms > 0 else num_guests
-            logger.info(f"Booking {num_rooms} room(s) with {num_guests} total guests = {guests_per_room} guests per room")
+            # Calculate guests per room with proper distribution
+            # Distribute guests evenly, with remainder going to first rooms
+            if num_rooms > 0:
+                base_guests_per_room = num_guests // num_rooms
+                remainder = num_guests % num_rooms
+                # First 'remainder' rooms get base + 1, rest get base
+                guests_distribution = [base_guests_per_room + 1] * remainder + [base_guests_per_room] * (num_rooms - remainder)
+            else:
+                guests_distribution = [num_guests]
+            
+            logger.info(f"Booking {num_rooms} room(s) with {num_guests} total guests = Distribution: {guests_distribution}")
             
             # Ensure connection is established
             self._ensure_connected()
@@ -1450,11 +1484,56 @@ class ExcelHandler:
                         
                         # Only fill blank cells (never overwrite)
                         if cell_value is None or str(cell_value).strip() == '':
-                            # Update cell with guests per room (not total guests)
+                            # Get guests for this specific room from distribution
+                            guests_for_this_room = guests_distribution[room_index] if room_index < len(guests_distribution) else base_guests_per_room
+                            
+                            # Update cell with guests for this specific room
                             self._rate_limit_api_call()
                             try:
-                                self.sheet.update_cell(row_num, col_num, guests_per_room)
+                                self.sheet.update_cell(row_num, col_num, guests_for_this_room)
                                 self._reset_429_backoff()
+                                
+                                # Add note/comment with booking metadata if available
+                                if booking_id:
+                                    try:
+                                        # Create note text with booking info
+                                        note_text = f"Booking ID: {booking_id}"
+                                        if customer_name:
+                                            note_text += f"\nCustomer: {customer_name}"
+                                        if phone_number:
+                                            note_text += f"\nPhone: {phone_number}"
+                                        
+                                        # Add note to cell using Google Sheets API batch_update
+                                        try:
+                                            # Get sheet ID from the worksheet
+                                            sheet_id = self.sheet.id
+                                            
+                                            # Create note request using batch_update
+                                            note_request = {
+                                                "requests": [{
+                                                    "updateCells": {
+                                                        "range": {
+                                                            "sheetId": sheet_id,
+                                                            "startRowIndex": row_num - 1,
+                                                            "endRowIndex": row_num,
+                                                            "startColumnIndex": col_num - 1,
+                                                            "endColumnIndex": col_num
+                                                        },
+                                                        "rows": [{
+                                                            "values": [{
+                                                                "note": note_text
+                                                            }]
+                                                        }],
+                                                        "fields": "note"
+                                                    }
+                                                }]
+                                            }
+                                            self._spreadsheet.batch_update(note_request)
+                                            logger.debug(f"Added booking metadata note to cell row {row_num}, col {col_num}")
+                                        except Exception as note_error:
+                                            logger.warning(f"Could not add note to cell: {note_error}")
+                                    except Exception as note_error:
+                                        logger.warning(f"Error adding booking metadata note: {note_error}")
                                 
                                 # Invalidate cache for this row since we updated it
                                 if cache_key in self._row_data_cache:
@@ -1462,7 +1541,8 @@ class ExcelHandler:
                                 
                                 rooms_booked_for_date += 1
                                 total_rooms_booked += 1
-                                logger.info(f"Booked room in column {col_num} ({room_types.get(col_num)}) for date {date_str} with {guests_per_room} guests per room")
+                                room_index += 1  # Move to next room in distribution
+                                logger.info(f"Booked room in column {col_num} ({room_types.get(col_num)}) for date {date_str} with {guests_for_this_room} guests")
                             except Exception as e2:
                                 error_str = str(e2).lower()
                                 if '429' in error_str or 'quota' in error_str:
@@ -1527,7 +1607,9 @@ class ExcelHandler:
                     "Created Date",
                     "Approved Date",
                     "Rejected Date",
-                    "Rejection Reason"
+                    "Rejection Reason",
+                    "Cancelled Date",
+                    "Cancellation Reason"
                 ]
                 worksheet.append_row(headers)
                 

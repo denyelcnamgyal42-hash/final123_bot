@@ -96,6 +96,7 @@ def dashboard():
             .status-pending { background: #ff9800; color: white; }
             .status-approved { background: #4caf50; color: white; }
             .status-rejected { background: #f44336; color: white; }
+            .status-cancelled { background: #9e9e9e; color: white; }
             .tabs { display: flex; margin-bottom: 20px; }
             .tab { padding: 10px 20px; cursor: pointer; border-bottom: 2px solid transparent; }
             .tab.active { border-bottom: 2px solid #2196F3; color: #2196F3; }
@@ -167,6 +168,17 @@ def dashboard():
                         <div class="booking-info"><strong>Reason:</strong> {{ booking.rejection_reason }}</div>
                         {% endif %}
                         {% endif %}
+                        {% if booking.cancelled_at %}
+                        <div class="booking-info"><strong>Cancelled:</strong> {{ booking.cancelled_at }}</div>
+                        {% if booking.cancellation_reason %}
+                        <div class="booking-info"><strong>Reason:</strong> {{ booking.cancellation_reason }}</div>
+                        {% endif %}
+                        {% endif %}
+                        <div class="actions">
+                            {% if booking.status == 'approved' %}
+                            <button class="btn-reject" onclick="cancelBooking('{{ booking.booking_id }}')" style="background: #ff9800;">Cancel Booking</button>
+                            {% endif %}
+                        </div>
                     </div>
                     {% endfor %}
                 {% else %}
@@ -221,6 +233,30 @@ def dashboard():
                 .then(data => {
                     if (data.success) {
                         alert('Booking rejected.');
+                        location.reload();
+                    } else {
+                        alert('Error: ' + data.message);
+                    }
+                })
+                .catch(error => {
+                    alert('Error: ' + error);
+                });
+            }
+            
+            function cancelBooking(bookingId) {
+                if (!confirm('Cancel this approved booking? This will free up the booking slot for the customer.')) return;
+                
+                const reason = prompt('Cancellation reason (optional):');
+                
+                fetch(`/api/cancel/${bookingId}?token={{ token }}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: reason || '' })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Booking cancelled. Customer can now make new bookings.');
                         location.reload();
                     } else {
                         alert('Error: ' + data.message);
@@ -290,7 +326,10 @@ def approve_booking(booking_id: str):
                 check_out=booking.check_out_date,
                 num_rooms=booking.num_rooms,
                 num_guests=booking.num_guests,
-                room_type_preference=booking.room_type_preference
+                room_type_preference=booking.room_type_preference,
+                booking_id=booking.booking_id,
+                customer_name=booking.customer_name,
+                phone_number=booking.phone_number
             )
             
             if not excel_success:
@@ -401,6 +440,57 @@ def reject_booking(booking_id: str):
         
     except Exception as e:
         logger.error(f"Error rejecting booking: {e}", exc_info=True)
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/cancel/<booking_id>", methods=["POST"])
+@require_auth
+def cancel_booking(booking_id: str):
+    """Cancel an approved booking."""
+    try:
+        data = request.get_json() or {}
+        reason = data.get("reason", "")
+        
+        booking = booking_manager.get_booking(booking_id)
+        if not booking:
+            return jsonify({"success": False, "message": "Booking not found"}), 404
+        
+        success, message = booking_manager.cancel_booking(booking_id, reason=reason)
+        
+        if not success:
+            return jsonify({"success": False, "message": message}), 400
+        
+        # Send WhatsApp notification to customer
+        if WHATSAPP_AVAILABLE:
+            try:
+                notification_message = (
+                    f"Hello {booking.customer_name},\n\n"
+                    f"We're sorry to inform you that your booking (ID: {booking.booking_id}) "
+                    f"has been cancelled."
+                )
+                
+                if reason:
+                    notification_message += f"\n\nReason: {reason}"
+                
+                notification_message += (
+                    f"\n\nWe apologize for any inconvenience. "
+                    f"You can now make a new booking request if you'd like. "
+                    f"If you have any questions, please feel free to contact us."
+                )
+                
+                send_whatsapp_message(booking.phone_number, notification_message)
+                logger.info(f"✅ Cancellation notification sent to {booking.phone_number}")
+            except Exception as e:
+                logger.error(f"Failed to send cancellation notification: {e}")
+        
+        return jsonify({
+            "success": True,
+            "message": "Booking cancelled successfully",
+            "booking": booking.to_dict()
+        })
+        
+    except Exception as e:
+        logger.error(f"Error cancelling booking: {e}", exc_info=True)
         return jsonify({"success": False, "message": str(e)}), 500
 
 

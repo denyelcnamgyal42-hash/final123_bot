@@ -321,7 +321,12 @@ def check_booking_status(phone_number: str) -> Dict[str, Any]:
                 "check_in": booking.check_in_date,
                 "check_out": booking.check_out_date,
                 "num_rooms": booking.num_rooms,
-                "status": booking.status
+                "num_guests": booking.num_guests,
+                "room_type": booking.room_type_preference or "Any available",
+                "status": booking.status,
+                "created_at": booking.created_at,
+                "approved_at": booking.approved_at,
+                "rejected_at": booking.rejected_at
             })
         
         return {
