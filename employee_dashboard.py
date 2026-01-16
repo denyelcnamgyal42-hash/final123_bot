@@ -460,6 +460,31 @@ def cancel_booking(booking_id: str):
         if not success:
             return jsonify({"success": False, "message": message}), 400
         
+        # Free up rooms in allocation sheet
+        if excel_handler:
+            free_success, free_message = excel_handler.free_up_rooms(
+                check_in=booking.check_in_date,
+                check_out=booking.check_out_date,
+                num_rooms=booking.num_rooms,
+                room_type_preference=booking.room_type_preference,
+                booking_id=booking.booking_id
+            )
+            if not free_success:
+                logger.warning(f"Failed to free up rooms for cancelled booking {booking_id}: {free_message}")
+            else:
+                logger.info(f"✅ Freed up rooms for cancelled booking {booking_id}: {free_message}")
+        
+        # Remove booking from monthly sheet
+        if excel_handler:
+            remove_success, remove_message = excel_handler.remove_booking_from_monthly_sheet(
+                booking_id=booking.booking_id,
+                check_in_date=booking.check_in_date
+            )
+            if not remove_success:
+                logger.warning(f"Failed to remove booking from monthly sheet: {remove_message}")
+            else:
+                logger.info(f"✅ Removed booking from monthly sheet: {remove_message}")
+        
         # Send WhatsApp notification to customer
         if WHATSAPP_AVAILABLE:
             try:
