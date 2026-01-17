@@ -375,27 +375,31 @@ class WhatsAppAgent:
                     chat_history.append(AIMessage(content=msg.content))
             
             # Set thread-local phone number for tools to access (security: prevents viewing other customers' bookings)
-            from langchain_tools import set_session_phone_number
+            from langchain_tools import set_session_phone_number, clear_session_phone_number
             set_session_phone_number(phone_number)
             
-            # Prepare input with context
-            # Include contact phone number in context if available
-            contact_info = f"\nContact phone for group bookings (more than 3 rooms): {config.CONTACT_PHONE_NUMBER}" if config.CONTACT_PHONE_NUMBER else ""
-            input_text = f"Customer name: {customer_name}\nPhone: {phone_number}{contact_info}\n\nMessage: {message}"
-            
-            # Run agent
-            result = self.agent_executor.invoke({
-                "input": input_text,
-                "chat_history": chat_history
-            })
-            
-            response = result.get("output", "I apologize, but I encountered an error. Please try again.")
-            
-            # Add assistant response to history
-            session.add_message("assistant", response)
-            session_manager.update_session(phone_number, session)
-            
-            return response
+            try:
+                # Prepare input with context
+                # Include contact phone number in context if available
+                contact_info = f"\nContact phone for group bookings (more than 3 rooms): {config.CONTACT_PHONE_NUMBER}" if config.CONTACT_PHONE_NUMBER else ""
+                input_text = f"Customer name: {customer_name}\nPhone: {phone_number}{contact_info}\n\nMessage: {message}"
+                
+                # Run agent
+                result = self.agent_executor.invoke({
+                    "input": input_text,
+                    "chat_history": chat_history
+                })
+                
+                response = result.get("output", "I apologize, but I encountered an error. Please try again.")
+                
+                # Add assistant response to history
+                session.add_message("assistant", response)
+                session_manager.update_session(phone_number, session)
+                
+                return response
+            finally:
+                # Always clear thread-local storage after processing to prevent data leakage
+                clear_session_phone_number()
             
         except Exception as e:
             logger.error(f"Error processing message: {e}", exc_info=True)

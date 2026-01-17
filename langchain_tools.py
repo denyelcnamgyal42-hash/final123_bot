@@ -237,17 +237,22 @@ def check_room_availability_range(check_in_date: str, check_out_date: str, room_
 
 
 @tool
-def create_booking_request(customer_name: str, phone_number: str,
-                          check_in_date: str, check_out_date: str,
-                          num_rooms: int, num_guests: int,
+def create_booking_request(customer_name: str, phone_number: str = "",
+                          check_in_date: str = "", check_out_date: str = "",
+                          num_rooms: int = 1, num_guests: int = 1,
                           room_type_preference: str = "") -> Dict[str, Any]:
     """
     Create a booking request (not a confirmed booking).
     This will be sent to hotel staff for manual approval.
     
+    SECURITY: The phone_number parameter is IGNORED for security. The tool automatically
+    uses the phone number from the session context to ensure bookings are created for
+    the correct customer.
+    
     Args:
         customer_name: Full name of the customer
-        phone_number: Customer's phone number
+        phone_number: IGNORED - This parameter is ignored for security. The tool automatically
+                     uses the phone number from the session context.
         check_in_date: Check-in date in YYYY-MM-DD format
         check_out_date: Check-out date in YYYY-MM-DD format
         num_rooms: Number of rooms required (maximum 3 rooms allowed through chatbot)
@@ -261,10 +266,79 @@ def create_booking_request(customer_name: str, phone_number: str,
         - "message": Success or error message
     """
     try:
-        room_pref = room_type_preference.strip() if room_type_preference else None
+        # SECURITY: Always use the session phone number, never trust the parameter
+        session_phone = get_session_phone_number()
+        if not session_phone:
+            logger.error("create_booking_request called without session phone number context")
+            return {
+                "success": False,
+                "booking_id": None,
+                "message": "I'm sorry, but I cannot create a booking request at this time. Please try again."
+            }
+        
+        # Validate required fields
+        if not check_in_date or not check_out_date:
+            return {
+                "success": False,
+                "booking_id": None,
+                "message": "I need both check-in and check-out dates to create your booking request. Please provide both dates."
+            }
+        
+        if not customer_name or customer_name.strip() == "":
+            return {
+                "success": False,
+                "booking_id": None,
+                "message": "I need your name to create the booking request. Please provide your full name."
+            }
+        
+        # SECURITY: Validate numeric inputs to prevent negative numbers or invalid values
+        if not isinstance(num_rooms, int) or num_rooms < 1:
+            return {
+                "success": False,
+                "booking_id": None,
+                "message": "Number of rooms must be at least 1. Please provide a valid number of rooms."
+            }
+        
+        if not isinstance(num_guests, int) or num_guests < 1:
+            return {
+                "success": False,
+                "booking_id": None,
+                "message": "Number of guests must be at least 1. Please provide a valid number of guests."
+            }
+        
+        # SECURITY: Validate date format (YYYY-MM-DD)
+        try:
+            from datetime import datetime
+            datetime.strptime(check_in_date, '%Y-%m-%d')
+            datetime.strptime(check_out_date, '%Y-%m-%d')
+        except ValueError:
+            return {
+                "success": False,
+                "booking_id": None,
+                "message": "Invalid date format. Dates must be in YYYY-MM-DD format."
+            }
+        
+        # SECURITY: Validate that check-out is after check-in
+        try:
+            from datetime import datetime
+            check_in = datetime.strptime(check_in_date, '%Y-%m-%d')
+            check_out = datetime.strptime(check_out_date, '%Y-%m-%d')
+            if check_out <= check_in:
+                return {
+                    "success": False,
+                    "booking_id": None,
+                    "message": "Check-out date must be after check-in date. Please provide valid dates."
+                }
+        except Exception:
+            pass  # Already validated above
+        
+        # SECURITY: Sanitize customer name (remove potentially dangerous characters, limit length)
+        customer_name = customer_name.strip()[:100]  # Limit to 100 characters
+        
+        room_pref = room_type_preference.strip()[:50] if room_type_preference else None  # Limit room type to 50 chars
         booking = booking_manager.create_booking_request(
             customer_name=customer_name,
-            phone_number=phone_number,
+            phone_number=session_phone,  # Use session phone number, ignore parameter
             check_in_date=check_in_date,
             check_out_date=check_out_date,
             num_rooms=num_rooms,
@@ -301,6 +375,11 @@ def set_session_phone_number(phone_number: str):
 def get_session_phone_number() -> Optional[str]:
     """Get the current session's phone number from thread-local storage."""
     return getattr(_thread_local, 'phone_number', None)
+
+def clear_session_phone_number():
+    """Clear the session phone number from thread-local storage (security: prevents data leakage)."""
+    if hasattr(_thread_local, 'phone_number'):
+        delattr(_thread_local, 'phone_number')
 
 @tool
 def check_booking_status(phone_number: str = "") -> Dict[str, Any]:
