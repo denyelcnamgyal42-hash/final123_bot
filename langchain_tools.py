@@ -8,8 +8,12 @@ from date_parser import DateParser
 from excel_handler import ExcelHandler
 from booking_manager import BookingManager
 import config
+import threading
 
 logger = logging.getLogger(__name__)
+
+# Thread-local storage for current session phone number
+_thread_local = threading.local()
 
 # Initialize components
 date_parser = DateParser()
@@ -290,22 +294,51 @@ def create_booking_request(customer_name: str, phone_number: str,
         }
 
 
+def set_session_phone_number(phone_number: str):
+    """Set the current session's phone number for thread-local access."""
+    _thread_local.phone_number = phone_number
+
+def get_session_phone_number() -> Optional[str]:
+    """Get the current session's phone number from thread-local storage."""
+    return getattr(_thread_local, 'phone_number', None)
+
 @tool
-def check_booking_status(phone_number: str) -> Dict[str, Any]:
+def check_booking_status(phone_number: str = "") -> Dict[str, Any]:
     """
-    Check the status of booking requests for a customer.
+    Check the status of booking requests for the CURRENT customer only.
+    
+    SECURITY: This tool ONLY shows bookings for the customer who is currently messaging.
+    It automatically uses the phone number from the session context, NOT any phone number
+    provided as a parameter. Customers can ONLY view their own bookings - this is a 
+    privacy and security requirement.
+    
+    IMPORTANT: The phone_number parameter is IGNORED for security. The tool automatically
+    uses the phone number from the session context. If a customer asks about someone else's 
+    booking, politely decline and explain that each customer can only view their own bookings.
     
     Args:
-        phone_number: Customer's phone number
+        phone_number: IGNORED - This parameter is ignored for security. The tool automatically
+                     uses the phone number from the session context.
         
     Returns:
         Dictionary with:
         - "success": bool
-        - "bookings": List of booking dictionaries
+        - "bookings": List of booking dictionaries (only for the current customer)
         - "message": Status message
     """
     try:
-        bookings = booking_manager.get_customer_bookings(phone_number)
+        # SECURITY: Always use the session phone number, never trust the parameter
+        session_phone = get_session_phone_number()
+        if not session_phone:
+            logger.error("check_booking_status called without session phone number context")
+            return {
+                "success": False,
+                "bookings": [],
+                "message": "I'm sorry, but I cannot retrieve booking information at this time. Please try again."
+            }
+        
+        # Use session phone number, ignore any phone number from the parameter
+        bookings = booking_manager.get_customer_bookings(session_phone)
         
         if not bookings:
             return {

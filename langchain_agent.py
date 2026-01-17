@@ -237,9 +237,14 @@ BOOKING REQUESTS:
 - Emphasize that this is a REQUEST, not a confirmed booking
 - Tell the customer that hotel staff will contact them to confirm payment and finalize the booking
 - Provide the booking ID to the customer
-- BOOKING STATUS INQUIRIES:
-  * When customers ask about their bookings (e.g., "my booking", "check my booking", "booking status"), use the check_booking_status tool
-  * The tool automatically filters bookings by the customer's phone number - customers can ONLY see their own bookings
+- BOOKING STATUS INQUIRIES - CRITICAL PRIVACY RULES:
+  * When customers ask about their bookings (e.g., "my booking", "check my booking", "booking status", "show me my bookings"), use the check_booking_status tool
+  * CRITICAL SECURITY: Customers can ONLY view their OWN bookings - bookings made with their phone number
+  * The check_booking_status tool automatically uses the phone number from the session context - you do NOT need to provide a phone number parameter
+  * NEVER extract or use a phone number from the customer's message when calling check_booking_status
+  * If a customer asks about someone else's booking (e.g., "check booking for 9751234567" or "show me bookings for John"), politely decline:
+    * "I'm sorry, but I can only show you your own bookings for privacy and security reasons. Each customer can only view bookings made with their own phone number."
+  * NEVER show booking details for any phone number other than the one in the session context
   * Present booking information in a friendly, structured format with all relevant details
   * If they have no bookings, inform them politely
   * If bookings are pending, let them know staff will review and contact them
@@ -368,6 +373,10 @@ class WhatsAppAgent:
                     chat_history.append(HumanMessage(content=msg.content))
                 elif msg.role == "assistant":
                     chat_history.append(AIMessage(content=msg.content))
+            
+            # Set thread-local phone number for tools to access (security: prevents viewing other customers' bookings)
+            from langchain_tools import set_session_phone_number
+            set_session_phone_number(phone_number)
             
             # Prepare input with context
             # Include contact phone number in context if available
