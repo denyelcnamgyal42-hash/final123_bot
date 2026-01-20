@@ -278,6 +278,13 @@ ERROR HANDLING:
 - Never hallucinate or guess information
 - Always be honest about what you can and cannot do
 
+HUMAN ESCALATION:
+- If a customer explicitly requests to speak with a human, staff member, or person (e.g., "talk to a person", "speak to human", "I want to talk to staff", "connect me to a human", "let me talk to someone"), respond warmly:
+  * "Of course! I'll have a staff member take over this conversation. Please wait a moment and they'll respond to you shortly. Thank you for your patience! 😊"
+  * Then the system will automatically switch this conversation to human mode
+- Be understanding and helpful - some customers prefer human interaction, and that's perfectly fine
+- Don't try to convince them to stay with the bot - just gracefully hand over to human staff
+
 Remember: You only create booking REQUESTS. Actual bookings are confirmed by hotel staff after payment verification."""
 
 
@@ -357,6 +364,30 @@ class WhatsAppAgent:
             Response message to send to user
         """
         try:
+            # Check for human escalation keywords
+            escalation_keywords = [
+                "talk to a person", "speak to human", "speak to a human", "talk to human", "talk to someone",
+                "connect me to a human", "let me talk to someone", "I want to talk to staff",
+                "I want to speak to staff", "speak to staff", "talk to staff", "human", "person",
+                "real person", "actual person", "staff member", "staff", "agent", "representative"
+            ]
+            
+            message_lower = message.lower().strip()
+            is_escalation = any(keyword in message_lower for keyword in escalation_keywords)
+            
+            if is_escalation:
+                # Enable human mode for this customer
+                from bot_control import get_bot_control_manager
+                bot_control = get_bot_control_manager()
+                bot_control.set_human_mode(phone_number, True)
+                logger.info(f"🔄 Customer {phone_number} requested human takeover - enabled human mode")
+                
+                return (
+                    "Of course! I'll have a staff member take over this conversation. "
+                    "Please wait a moment and they'll respond to you shortly. "
+                    "Thank you for your patience! 😊"
+                )
+            
             # Get or create session
             session = session_manager.get_session(phone_number)
             

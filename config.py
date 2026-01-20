@@ -84,3 +84,7 @@ MAX_ROOMS_PER_BOOKING = int(os.getenv("MAX_ROOMS_PER_BOOKING", "3"))
 MAX_BOOKINGS_PER_CUSTOMER = int(os.getenv("MAX_BOOKINGS_PER_CUSTOMER", "3"))
 BOOKING_COOLDOWN_DAYS = int(os.getenv("BOOKING_COOLDOWN_DAYS", "7"))  # Days to wait before next booking after max reached
 CONTACT_PHONE_NUMBER = os.getenv("CONTACT_PHONE_NUMBER", "975-17892899").strip()
+
+# Bot Control Configuration
+# Set to False to globally disable bot (all messages will be handled by humans)
+BOT_ENABLED = os.getenv("BOT_ENABLED", "true").lower() == "true"

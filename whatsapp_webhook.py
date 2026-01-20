@@ -133,6 +133,30 @@ def process_message_async():
             logger.info(f"Processing async message from {phone}")
             
             try:
+                # Check bot control status
+                from bot_control import get_bot_control_manager
+                bot_control = get_bot_control_manager()
+                
+                # Check if bot should process this message
+                if not bot_control.should_use_bot(phone):
+                    # Bot is disabled globally or customer is in human mode
+                    if not bot_control.is_bot_enabled():
+                        human_msg = (
+                            "Hello! Our team is currently replying to messages manually. "
+                            "Please wait for a staff member to respond. Thank you for your patience! 😊"
+                        )
+                    else:
+                        # Customer is in human mode
+                        human_msg = (
+                            "Hello! A staff member will respond to your message shortly. "
+                            "Thank you for your patience! 😊"
+                        )
+                    
+                    logger.info(f"🤖 Bot disabled for {phone}, sending human mode message")
+                    send_whatsapp_message(phone, human_msg, message_id)
+                    message_queue.task_done()
+                    continue
+                
                 # Process with agent - access through module to get current value
                 agent = langchain_agent.get_agent() if langchain_agent else None
                 if agent is None:

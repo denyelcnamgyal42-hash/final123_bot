@@ -102,11 +102,35 @@ def dashboard():
             .tab.active { border-bottom: 2px solid #2196F3; color: #2196F3; }
             .tab-content { display: none; }
             .tab-content.active { display: block; }
+            .bot-control { background: #e3f2fd; padding: 15px; margin-bottom: 20px; border-radius: 5px; border: 1px solid #2196F3; }
+            .bot-control h3 { margin-top: 0; color: #1976d2; }
+            .bot-status { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+            .bot-status-indicator { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+            .bot-status-indicator.enabled { background: #4caf50; }
+            .bot-status-indicator.disabled { background: #f44336; }
+            .btn-toggle { background: #2196F3; color: white; }
+            .human-mode-list { margin-top: 10px; }
+            .human-mode-item { background: white; padding: 8px; margin: 5px 0; border-radius: 3px; display: flex; justify-content: space-between; align-items: center; }
+            .btn-return-to-bot { background: #ff9800; color: white; padding: 5px 10px; font-size: 12px; }
         </style>
     </head>
     <body>
         <div class="container">
             <h1>🏨 Hotel Booking Dashboard</h1>
+            
+            <!-- Bot Control Section -->
+            <div class="bot-control">
+                <h3>🤖 Bot Control</h3>
+                <div class="bot-status">
+                    <span class="bot-status-indicator" id="botStatusIndicator"></span>
+                    <span id="botStatusText">Loading...</span>
+                    <button class="btn-toggle" onclick="toggleBot()" id="toggleBotBtn">Toggle Bot</button>
+                </div>
+                <div class="human-mode-list" id="humanModeList">
+                    <strong>Customers in Human Mode:</strong>
+                    <div id="humanModeCustomers">Loading...</div>
+                </div>
+            </div>
             
             <div class="tabs">
                 <div class="tab active" onclick="showTab('pending')">Pending ({{ pending_count }})</div>
@@ -188,6 +212,99 @@ def dashboard():
         </div>
         
         <script>
+            const token = '{{ token }}';
+            
+            // Load bot status on page load
+            function loadBotStatus() {
+                fetch(`/api/bot/status?token=${token}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            updateBotStatusUI(data.bot_enabled, data.human_mode_customers);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error loading bot status:', error);
+                    });
+            }
+            
+            function updateBotStatusUI(botEnabled, humanModeCustomers) {
+                const indicator = document.getElementById('botStatusIndicator');
+                const statusText = document.getElementById('botStatusText');
+                const toggleBtn = document.getElementById('toggleBotBtn');
+                const customersDiv = document.getElementById('humanModeCustomers');
+                
+                if (botEnabled) {
+                    indicator.className = 'bot-status-indicator enabled';
+                    statusText.textContent = 'Bot is ENABLED';
+                    toggleBtn.textContent = 'Disable Bot';
+                } else {
+                    indicator.className = 'bot-status-indicator disabled';
+                    statusText.textContent = 'Bot is DISABLED (Human mode for all)';
+                    toggleBtn.textContent = 'Enable Bot';
+                }
+                
+                // Display human mode customers
+                const customerPhones = Object.keys(humanModeCustomers);
+                if (customerPhones.length === 0) {
+                    customersDiv.innerHTML = '<em>No customers in human mode</em>';
+                } else {
+                    customersDiv.innerHTML = customerPhones.map(phone => 
+                        `<div class="human-mode-item">
+                            <span>${phone}</span>
+                            <button class="btn-return-to-bot" onclick="returnToBot('${phone}')">Return to Bot</button>
+                        </div>`
+                    ).join('');
+                }
+            }
+            
+            function toggleBot() {
+                fetch(`/api/bot/toggle?token=${token}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            loadBotStatus(); // Reload status
+                            alert(data.message);
+                        } else {
+                            alert('Error: ' + data.message);
+                        }
+                    })
+                    .catch(error => {
+                        alert('Error: ' + error);
+                    });
+            }
+            
+            function returnToBot(phoneNumber) {
+                if (!confirm(`Return customer ${phoneNumber} to bot mode?`)) return;
+                
+                fetch(`/api/bot/human-mode/${phoneNumber}?token=${token}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ human_mode: false })
+                })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            loadBotStatus(); // Reload status
+                            alert(data.message);
+                        } else {
+                            alert('Error: ' + data.message);
+                        }
+                    })
+                    .catch(error => {
+                        alert('Error: ' + error);
+                    });
+            }
+            
+            // Load bot status on page load
+            loadBotStatus();
+            // Refresh every 30 seconds
+            setInterval(loadBotStatus, 30000);
+            
             function showTab(tabName) {
                 document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
                 document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -204,7 +321,7 @@ def dashboard():
             function approveBooking(bookingId) {
                 if (!confirm('Approve this booking? This will update the Excel sheet.')) return;
                 
-                fetch(`/api/approve/${bookingId}?token={{ token }}`, {
+                fetch(`/api/approve/${bookingId}?token=${token}`, {
                     method: 'POST'
                 })
                 .then(response => response.json())
@@ -224,7 +341,7 @@ def dashboard():
             function rejectBooking(bookingId) {
                 const reason = prompt('Rejection reason (optional):');
                 
-                fetch(`/api/reject/${bookingId}?token={{ token }}`, {
+                fetch(`/api/reject/${bookingId}?token=${token}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ reason: reason || '' })
@@ -248,7 +365,7 @@ def dashboard():
                 
                 const reason = prompt('Cancellation reason (optional):');
                 
-                fetch(`/api/cancel/${bookingId}?token={{ token }}`, {
+                fetch(`/api/cancel/${bookingId}?token=${token}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ reason: reason || '' })
@@ -532,6 +649,78 @@ def get_booking(booking_id: str):
         "success": True,
         "booking": booking.to_dict()
     })
+
+
+# Bot Control Endpoints
+@app.route("/api/bot/status", methods=["GET"])
+@require_auth
+def get_bot_status():
+    """Get current bot enabled status and human mode customers."""
+    try:
+        from bot_control import get_bot_control_manager
+        bot_control = get_bot_control_manager()
+        
+        return jsonify({
+            "success": True,
+            "bot_enabled": bot_control.is_bot_enabled(),
+            "human_mode_customers": bot_control.get_all_human_mode_customers()
+        })
+    except Exception as e:
+        logger.error(f"Error getting bot status: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/bot/toggle", methods=["POST"])
+@require_auth
+def toggle_bot():
+    """Toggle global bot enabled/disabled status."""
+    try:
+        from bot_control import get_bot_control_manager
+        bot_control = get_bot_control_manager()
+        
+        data = request.get_json() or {}
+        enabled = data.get("enabled")
+        
+        if enabled is None:
+            # Toggle current state
+            current_state = bot_control.is_bot_enabled()
+            enabled = not current_state
+        else:
+            enabled = bool(enabled)
+        
+        bot_control.set_bot_enabled(enabled)
+        
+        return jsonify({
+            "success": True,
+            "bot_enabled": enabled,
+            "message": f"Bot {'enabled' if enabled else 'disabled'} successfully"
+        })
+    except Exception as e:
+        logger.error(f"Error toggling bot: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+
+@app.route("/api/bot/human-mode/<phone_number>", methods=["POST"])
+@require_auth
+def set_human_mode(phone_number: str):
+    """Set human mode for a specific customer."""
+    try:
+        from bot_control import get_bot_control_manager
+        bot_control = get_bot_control_manager()
+        
+        data = request.get_json() or {}
+        human_mode = data.get("human_mode", True)
+        
+        bot_control.set_human_mode(phone_number, bool(human_mode))
+        
+        return jsonify({
+            "success": True,
+            "human_mode": bool(human_mode),
+            "message": f"Human mode {'enabled' if human_mode else 'disabled'} for {phone_number}"
+        })
+    except Exception as e:
+        logger.error(f"Error setting human mode: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 if __name__ == "__main__":
