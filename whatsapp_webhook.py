@@ -211,38 +211,63 @@ def verify_webhook():
 @limiter.limit("80 per second")
 def handle_webhook():
     """Handle incoming WhatsApp messages."""
+    logger.info("=" * 60)
     logger.info("📥 Received POST to /webhook")
     logger.info(f"   Headers: {dict(request.headers)}")
     logger.info(f"   Content-Type: {request.content_type}")
     logger.info(f"   Content-Length: {request.content_length}")
+    logger.info(f"   Remote Address: {request.remote_addr}")
+    logger.info(f"   Full URL: {request.url}")
     
     try:
+        # Get raw data first to see what we're receiving
+        raw_data = request.get_data(as_text=True)
+        logger.info(f"   Raw request data: {raw_data[:500]}")  # First 500 chars
+        
         # Parse the JSON data
         data = request.get_json()
-        logger.info(f"Raw webhook data: {data}")
+        logger.info(f"   Parsed JSON data: {data}")
         
         if not data:
-            logger.warning("Empty request received")
-            return jsonify({"status": "ignored"}), 200
+            logger.warning("⚠️ Empty request received - no JSON data")
+            logger.warning(f"   Raw data was: {raw_data[:200] if raw_data else 'None'}")
+            return jsonify({"status": "ignored", "reason": "empty_request"}), 200
+        
+        logger.info(f"   Object type: {data.get('object')}")
         
         if data.get("object") != "whatsapp_business_account":
-            logger.warning(f"Invalid object type: {data.get('object')}")
-            return jsonify({"status": "ignored"}), 200
+            logger.warning(f"⚠️ Invalid object type: {data.get('object')} (expected: whatsapp_business_account)")
+            logger.warning(f"   Full data: {data}")
+            return jsonify({"status": "ignored", "reason": "invalid_object"}), 200
         
         entries = data.get("entry", [])
+        logger.info(f"   Number of entries: {len(entries)}")
+        
+        if not entries:
+            logger.warning("⚠️ No entries in webhook data")
+            return jsonify({"status": "ignored", "reason": "no_entries"}), 200
         
         for entry in entries:
             changes = entry.get("changes", [])
+            logger.info(f"   Entry ID: {entry.get('id')}, Changes: {len(changes)}")
             
             for change in changes:
                 value = change.get("value", {})
+                field = change.get("field", "unknown")
+                logger.info(f"   Change field: {field}")
+                logger.info(f"   Value keys: {list(value.keys())}")
                 
                 # Handle messages
                 if "messages" in value:
+                    logger.info(f"   ✅ Found messages in webhook data!")
                     messages = value["messages"]
                     
                     for message in messages:
-                        if message.get("type") == "text":
+                        msg_type = message.get("type")
+                        logger.info(f"   📨 Message type: {msg_type}")
+                        logger.info(f"   📨 Message ID: {message.get('id')}")
+                        
+                        if msg_type == "text":
                             from_number = message.get("from", "")
                             message_text = message.get("text", {}).get("body", "")
                             message_id = message.get("id", "")
@@ -267,8 +292,18 @@ def handle_webhook():
                                     logger.error("Message queue is full!")
                                     send_whatsapp_message(from_number, "I'm busy. Please try again later.", message_id)
                             except Exception as e:
-                                logger.error(f"Error queuing message: {e}")
+                                logger.error(f"❌ Error queuing message: {e}", exc_info=True)
+                        else:
+                            logger.info(f"   ℹ️ Skipping non-text message type: {msg_type}")
+                else:
+                    logger.info(f"   ℹ️ No 'messages' in value. Value contains: {list(value.keys())}")
+                    # Log status updates or other webhook events
+                    if "statuses" in value:
+                        logger.info(f"   📊 Status update received (not a message)")
+                    else:
+                        logger.info(f"   ℹ️ Other webhook event (not a message)")
         
+        logger.info("=" * 60)
         # Always return 200 immediately
         return jsonify({"status": "accepted"}), 200
     
@@ -285,9 +320,11 @@ def root():
         "timestamp": datetime.now().isoformat(),
         "endpoints": {
             "webhook": "/webhook",
-            "dashboard": "/dashboard",
+            "webhook_info": "/webhook-info",
+            "dashboard": "/dashboard?token=hotel-staff-2024",
             "health": "/health"
-        }
+        },
+        "message": "Service is running. Use /webhook-info to check webhook configuration."
     }), 200
 
 @app.route("/health", methods=["GET"])
@@ -296,7 +333,19 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "queue_size": message_queue.qsize()
+        "queue_size": message_queue.qsize(),
+        "agent_initialized": langchain_agent is not None and langchain_agent.get_agent() is not None
+    }), 200
+
+@app.route("/test-webhook", methods=["GET", "POST"])
+def test_webhook():
+    """Test endpoint to verify webhook is accessible."""
+    return jsonify({
+        "status": "webhook_reachable",
+        "method": request.method,
+        "timestamp": datetime.now().isoformat(),
+        "message": "If you can see this, the webhook endpoint is accessible!",
+        "next_steps": "Configure this URL in Meta: https://your-service.onrender.com/webhook"
     }), 200
 
 @app.route("/send-test", methods=["POST"])
@@ -323,19 +372,42 @@ def send_test_message():
 @app.route("/webhook-info", methods=["GET"])
 def webhook_info():
     """Endpoint to check webhook configuration (for debugging)."""
+    host = request.host
+    # Handle Render's internal routing
+    if host.startswith("127.0.0.1") or host.startswith("10."):
+        # Try to get the actual Render URL from headers or use a placeholder
+        host = request.headers.get('Host', 'your-service.onrender.com')
+    
+    webhook_url = f"https://{host}/webhook"
+    
     return jsonify({
-        "webhook_url": f"https://{request.host}/webhook",
+        "status": "webhook_info",
+        "webhook_url": webhook_url,
         "verify_token_configured": bool(config.WHATSAPP_VERIFY_TOKEN),
         "verify_token_length": len(config.WHATSAPP_VERIFY_TOKEN) if config.WHATSAPP_VERIFY_TOKEN else 0,
+        "verify_token_preview": f"{config.WHATSAPP_VERIFY_TOKEN[:4]}..." if config.WHATSAPP_VERIFY_TOKEN and len(config.WHATSAPP_VERIFY_TOKEN) > 4 else "Not set",
         "phone_number_id_configured": bool(config.WHATSAPP_PHONE_NUMBER_ID),
         "access_token_configured": bool(config.WHATSAPP_ACCESS_TOKEN),
-        "api_url": config.WHATSAPP_API_URL,
+        "api_url": config.WHATSAPP_API_URL if config.WHATSAPP_API_URL else "Not configured",
+        "test_endpoints": {
+            "root": "/",
+            "webhook_get": "/webhook?hub.mode=subscribe&hub.verify_token=YOUR_TOKEN&hub.challenge=test123",
+            "webhook_post": "/webhook (POST - for incoming messages)",
+            "health": "/health"
+        },
         "instructions": {
-            "step1": "Go to Meta for Developers → WhatsApp → Configuration",
-            "step2": f"Set Callback URL to: https://{request.host}/webhook",
+            "step1": "Go to https://developers.facebook.com/apps → Your App → WhatsApp → Configuration",
+            "step2": f"In 'Webhook' section, set Callback URL to: {webhook_url}",
             "step3": f"Set Verify Token to: {config.WHATSAPP_VERIFY_TOKEN}",
-            "step4": "Click 'Verify and Save'",
-            "step5": "Make sure webhook is subscribed to 'messages' field"
+            "step4": "Click 'Verify and Save' - you should see verification in logs",
+            "step5": "Subscribe to 'messages' field in Webhook fields section",
+            "step6": "Send a test message to your WhatsApp Business number",
+            "step7": "Check logs for '📥 Received POST to /webhook'"
+        },
+        "troubleshooting": {
+            "no_messages": "If no messages appear: 1) Check webhook is subscribed to 'messages', 2) Verify token matches exactly, 3) Check WhatsApp Business number is correct",
+            "forbidden_error": "If you see 'forbidden' when accessing /dashboard, add ?token=hotel-staff-2024 to the URL",
+            "verification_failed": "If webhook verification fails, check that WHATSAPP_VERIFY_TOKEN in Render matches exactly what you enter in Meta"
         }
     }), 200
 
