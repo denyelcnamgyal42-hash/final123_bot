@@ -192,7 +192,13 @@ def verify_webhook():
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
     
-    logger.info(f"🔍 Webhook verification attempt: mode={mode}")
+    logger.info(f"🔍 Webhook verification attempt:")
+    logger.info(f"   Mode: {mode}")
+    logger.info(f"   Token received: {token}")
+    logger.info(f"   Token expected: {config.WHATSAPP_VERIFY_TOKEN}")
+    logger.info(f"   Challenge: {challenge}")
+    logger.info(f"   Full URL: {request.url}")
+    logger.info(f"   Headers: {dict(request.headers)}")
     
     if mode == "subscribe" and token == config.WHATSAPP_VERIFY_TOKEN:
         logger.info("✅ Webhook verified successfully")
@@ -206,6 +212,9 @@ def verify_webhook():
 def handle_webhook():
     """Handle incoming WhatsApp messages."""
     logger.info("📥 Received POST to /webhook")
+    logger.info(f"   Headers: {dict(request.headers)}")
+    logger.info(f"   Content-Type: {request.content_type}")
+    logger.info(f"   Content-Length: {request.content_length}")
     
     try:
         # Parse the JSON data
@@ -310,6 +319,25 @@ def send_test_message():
             
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+@app.route("/webhook-info", methods=["GET"])
+def webhook_info():
+    """Endpoint to check webhook configuration (for debugging)."""
+    return jsonify({
+        "webhook_url": f"https://{request.host}/webhook",
+        "verify_token_configured": bool(config.WHATSAPP_VERIFY_TOKEN),
+        "verify_token_length": len(config.WHATSAPP_VERIFY_TOKEN) if config.WHATSAPP_VERIFY_TOKEN else 0,
+        "phone_number_id_configured": bool(config.WHATSAPP_PHONE_NUMBER_ID),
+        "access_token_configured": bool(config.WHATSAPP_ACCESS_TOKEN),
+        "api_url": config.WHATSAPP_API_URL,
+        "instructions": {
+            "step1": "Go to Meta for Developers → WhatsApp → Configuration",
+            "step2": f"Set Callback URL to: https://{request.host}/webhook",
+            "step3": f"Set Verify Token to: {config.WHATSAPP_VERIFY_TOKEN}",
+            "step4": "Click 'Verify and Save'",
+            "step5": "Make sure webhook is subscribed to 'messages' field"
+        }
+    }), 200
 
 def cleanup():
     """Cleanup function for graceful shutdown."""
