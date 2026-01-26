@@ -267,6 +267,20 @@ def handle_webhook():
         logger.error(f"❌ Error handling webhook: {e}", exc_info=True)
         return jsonify({"status": "error", "message": "Internal server error"}), 500
 
+@app.route("/", methods=["GET"])
+def root():
+    """Root endpoint for health checks."""
+    return jsonify({
+        "status": "online",
+        "service": "Hotel Booking WhatsApp Chatbot",
+        "timestamp": datetime.now().isoformat(),
+        "endpoints": {
+            "webhook": "/webhook",
+            "dashboard": "/dashboard",
+            "health": "/health"
+        }
+    }), 200
+
 @app.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint."""

@@ -99,42 +99,32 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Start webhook server in a separate thread
-    webhook_thread = threading.Thread(target=run_webhook, daemon=True)
-    webhook_thread.start()
-    logger.info(f"✅ Webhook server thread started")
-    
-    # Give webhook a moment to start
-    time.sleep(1)
-    
-    # Start dashboard server in a separate thread
-    dashboard_thread = threading.Thread(target=run_dashboard, daemon=True)
-    dashboard_thread.start()
-    logger.info(f"✅ Dashboard server thread started")
-    
-    # Give dashboard a moment to start
-    time.sleep(1)
-    
+    # For Render: Only run webhook app (dashboard routes are registered on it)
+    # Run in main thread so Render detects the process is alive
     logger.info("=" * 60)
     logger.info("🎉 Hotel Booking Chatbot is running!")
     logger.info("=" * 60)
-    logger.info(f"📱 WhatsApp Webhook: http://0.0.0.0:{config.PORT}")
-    logger.info(f"🏨 Employee Dashboard: http://0.0.0.0:{config.DASHBOARD_PORT}/dashboard")
+    logger.info(f"📱 WhatsApp Webhook: http://0.0.0.0:{config.PORT}/webhook")
+    logger.info(f"🏨 Employee Dashboard: http://0.0.0.0:{config.PORT}/dashboard")
     logger.info("=" * 60)
-    logger.info("Press Ctrl+C to stop both servers")
+    logger.info("Starting server on main thread (Render-compatible)...")
     logger.info("=" * 60)
     
-    # Keep main thread alive
+    # Run webhook app in main thread (this blocks, keeping process alive)
+    # Dashboard routes are already registered on webhook_app
     try:
-        while True:
-            time.sleep(1)
-            # Check if threads are still alive
-            if not webhook_thread.is_alive():
-                logger.error("❌ Webhook server thread died!")
-            if not dashboard_thread.is_alive():
-                logger.error("❌ Dashboard server thread died!")
+        webhook_app.run(
+            host="0.0.0.0",
+            port=config.PORT,
+            debug=False,
+            threaded=True,
+            use_reloader=False
+        )
     except KeyboardInterrupt:
         signal_handler(None, None)
+    except Exception as e:
+        logger.error(f"❌ Error running server: {e}", exc_info=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
