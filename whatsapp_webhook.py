@@ -13,6 +13,11 @@ try:
     import langchain_agent
 except ImportError:
     langchain_agent = None
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+if langchain_agent is None:
     logger.warning("WhatsApp agent module not available")
 from flask_limiter import Limiter 
 from flask_limiter.util import get_remote_address
