@@ -1,5 +1,5 @@
 """
-Excel and Google Sheets handler for reading and updating room availability.
+Google Sheets handler for reading and updating room availability.
 Maintains the fixed structure: Rows = dates, Columns = rooms.
 """
 import os
@@ -12,14 +12,6 @@ import json
 logger = logging.getLogger(__name__)
 
 # Try to import required libraries
-try:
-    import openpyxl
-    from openpyxl import load_workbook, Workbook
-    OPENPYXL_AVAILABLE = True
-except ImportError:
-    OPENPYXL_AVAILABLE = False
-    logger.warning("openpyxl not available. Excel functionality will be limited.")
-
 try:
     import gspread
     from gspread import exceptions as gspread_exceptions
@@ -34,26 +26,27 @@ except ImportError:
 
 
 class ExcelHandler:
-    """Handles reading and writing to Excel/Google Sheets for room availability."""
+    """Handles reading and writing to Google Sheets for room availability."""
     
-    def __init__(self, excel_path: Optional[str] = None, 
+    def __init__(self, 
                  google_sheet_id: Optional[str] = None,
                  google_credentials_path: Optional[str] = None,
                  sheet_name: str = "Sheet1"):
         """
-        Initialize Excel handler.
+        Initialize Google Sheets handler.
         
         Args:
-            excel_path: Path to local Excel file
-            google_sheet_id: Google Sheet ID (if using Google Sheets)
+            google_sheet_id: Google Sheet ID
             google_credentials_path: Path to Google credentials JSON
             sheet_name: Name of the sheet to use
         """
-        self.excel_path = excel_path
+        if not google_sheet_id:
+            raise ValueError("google_sheet_id is required. This handler only supports Google Sheets.")
+        
         self.google_sheet_id = google_sheet_id
         self.google_credentials_path = google_credentials_path
         self.sheet_name = sheet_name
-        self.use_google_sheets = google_sheet_id is not None
+        self.use_google_sheets = True
         
         # Connection state tracking for Google Sheets
         self._initialized = False
@@ -83,10 +76,7 @@ class ExcelHandler:
         self._consecutive_429_errors = 0
         self._backoff_until = 0
         
-        if self.use_google_sheets:
-            self._init_google_sheets()
-        elif excel_path:
-            self._init_excel()
+        self._init_google_sheets()
     
     def _get_service_account_email(self) -> str:
         """Get service account email from credentials file."""
@@ -278,47 +268,6 @@ class ExcelHandler:
                     logger.error(f"❌ Error accessing worksheet: {ws_error}")
                     raise
     
-    def _init_excel(self):
-        """Initialize Excel file connection."""
-        if not OPENPYXL_AVAILABLE:
-            raise ImportError("openpyxl is required for Excel support. Install with: pip install openpyxl")
-        
-        if not os.path.exists(self.excel_path):
-            logger.warning(f"Excel file not found: {self.excel_path}. Creating new file.")
-            self._create_new_excel()
-        else:
-            try:
-                self.workbook = load_workbook(self.excel_path, data_only=True)
-                if self.sheet_name in self.workbook.sheetnames:
-                    self.worksheet = self.workbook[self.sheet_name]
-                    logger.info(f"Loaded Excel file: {self.excel_path} with sheet '{self.sheet_name}'")
-                else:
-                    logger.warning(f"Sheet '{self.sheet_name}' not found in {self.excel_path}. Creating new sheet...")
-                    # Create the sheet if it doesn't exist
-                    self.worksheet = self.workbook.create_sheet(self.sheet_name)
-                    # Set header row
-                    self.worksheet['A1'] = 'Date'
-                    self.worksheet['B1'] = 'Room 1'
-                    self.worksheet['C1'] = 'Room 2'
-                    self.workbook.save(self.excel_path)
-                    logger.info(f"Created new sheet '{self.sheet_name}' in Excel file")
-            except Exception as e:
-                error_msg = f"Failed to load Excel file {self.excel_path}: {str(e)}"
-                logger.error(error_msg)
-                raise RuntimeError(error_msg)
-    
-    def _create_new_excel(self):
-        """Create a new Excel file with basic structure."""
-        self.workbook = Workbook()
-        self.worksheet = self.workbook.active
-        self.worksheet.title = self.sheet_name
-        # Set header row: Date in A1, Room columns start from B1
-        self.worksheet['A1'] = 'Date'
-        self.worksheet['B1'] = 'Room 1'
-        self.worksheet['C1'] = 'Room 2'
-        self.workbook.save(self.excel_path)
-        logger.info(f"Created new Excel file: {self.excel_path}")
-    
     def find_date_row(self, date_str: str) -> Optional[int]:
         """
         Find the row number for a given date (YYYY-MM-DD format).
@@ -329,74 +278,7 @@ class ExcelHandler:
         Returns:
             Row number (1-indexed) or None if not found
         """
-        if self.use_google_sheets:
-            return self._find_date_row_google(date_str)
-        else:
-            return self._find_date_row_excel(date_str)
-    
-    def _find_date_row_excel(self, date_str: str) -> Optional[int]:
-        """Find date row in Excel file."""
-        try:
-            # Parse the date
-            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
-            target_month = date_obj.month
-            target_day = date_obj.day
-            
-            # Check all rows in column A (date column), skip header rows 1-3
-            for row_idx in range(4, self.worksheet.max_row + 1):
-                cell_value = self.worksheet.cell(row=row_idx, column=1).value
-                
-                if cell_value is None:
-                    continue
-                
-                # Try to match date in various formats
-                if isinstance(cell_value, datetime):
-                    # Match by month and day (ignore year)
-                    if cell_value.month == target_month and cell_value.day == target_day:
-                        return row_idx
-                elif isinstance(cell_value, str):
-                    cell_str = str(cell_value).strip().lower()
-                    
-                    # Try parsing formats like "January 15", "January 15, 2025", etc.
-                    try:
-                        import re
-                        # Remove year if present
-                        date_clean = re.sub(r',\s*\d{4}', '', cell_str)
-                        
-                        # Parse month name and day
-                        month_names = {
-                            'january': 1, 'jan': 1, 'february': 2, 'feb': 2,
-                            'march': 3, 'mar': 3, 'april': 4, 'apr': 4,
-                            'may': 5, 'june': 6, 'jun': 6, 'july': 7, 'jul': 7,
-                            'august': 8, 'aug': 8, 'september': 9, 'sep': 9, 'sept': 9,
-                            'october': 10, 'oct': 10, 'november': 11, 'nov': 11,
-                            'december': 12, 'dec': 12
-                        }
-                        
-                        for month_name, month_num in month_names.items():
-                            if month_name in date_clean:
-                                day_match = re.search(r'\b(\d{1,2})\b', date_clean)
-                                if day_match:
-                                    day_num = int(day_match.group(1))
-                                    if month_num == target_month and day_num == target_day:
-                                        return row_idx
-                    except Exception:
-                        pass
-                    
-                    # Try standard date formats
-                    for fmt in ['%Y-%m-%d', '%d/%m/%Y', '%m/%d/%Y', '%d-%m-%Y', '%Y/%m/%d', '%B %d', '%B %d, %Y', '%b %d', '%b %d, %Y']:
-                        try:
-                            parsed = datetime.strptime(cell_value, fmt)
-                            # Match by month and day (ignore year)
-                            if parsed.month == target_month and parsed.day == target_day:
-                                return row_idx
-                        except ValueError:
-                            continue
-            
-            return None
-        except Exception as e:
-            logger.error(f"Error finding date row: {e}")
-            return None
+        return self._find_date_row_google(date_str)
     
     def _find_date_row_google(self, date_str: str) -> Optional[int]:
         """Find date row in Google Sheet."""
@@ -513,10 +395,7 @@ class ExcelHandler:
             return False, "Availability cannot be checked for that date.", 0, {}
         
         try:
-            if self.use_google_sheets:
-                is_available, status_message, available_count, room_types_dict = self._check_availability_google(row_num)
-            else:
-                is_available, status_message, available_count, room_types_dict = self._check_availability_excel(row_num)
+            is_available, status_message, available_count, room_types_dict = self._check_availability_google(row_num)
             
             # If a specific room type was requested, filter the results
             if room_type:
@@ -548,10 +427,7 @@ class ExcelHandler:
                 else:
                     # Check if any rooms of this type exist in the sheet
                     all_room_types = set()
-                    if self.use_google_sheets:
-                        room_types_map = self._get_room_types_google()
-                    else:
-                        room_types_map = self._get_room_types_excel()
+                    room_types_map = self._get_room_types_google()
                     for rtype in room_types_map.values():
                         all_room_types.add(rtype.lower())
                     
@@ -603,10 +479,7 @@ class ExcelHandler:
             logger.info(f"Checking availability for {len(dates_to_check)} nights: {dates_to_check}")
             
             # Get room types mapping
-            if self.use_google_sheets:
-                room_types_map = self._get_room_types_google()
-            else:
-                room_types_map = self._get_room_types_excel()
+            room_types_map = self._get_room_types_google()
             
             # If room type is specified, filter to only that type (with fuzzy matching)
             if room_type:
@@ -773,36 +646,6 @@ class ExcelHandler:
                                 if room_type_name not in available_columns_by_type:
                                     available_columns_by_type[room_type_name] = []
                                 available_columns_by_type[room_type_name].append(col_idx)
-            else:
-                # Excel: use individual reads (no API quota issues)
-                for col_idx, room_type_name in room_types_map.items():
-                    is_available_all_dates = True
-                    
-                    # Check this column for all dates
-                    for date_str in dates_to_check:
-                        row_num = date_row_map.get(date_str)
-                        if row_num is None:
-                            is_available_all_dates = False
-                            break
-                        
-                        # Check if this room is available on this date
-                        try:
-                            cell_value = self.worksheet.cell(row=row_num, column=col_idx).value
-                            
-                            # Room is occupied if cell has a value
-                            if cell_value is not None and str(cell_value).strip() != '':
-                                is_available_all_dates = False
-                                break
-                        except Exception as e:
-                            logger.debug(f"Error checking column {col_idx} for date {date_str}: {e}")
-                            is_available_all_dates = False
-                            break
-                    
-                    # If room is available for all dates, add it
-                    if is_available_all_dates:
-                        if room_type_name not in available_columns_by_type:
-                            available_columns_by_type[room_type_name] = []
-                        available_columns_by_type[room_type_name].append(col_idx)
             
             # Count available rooms by type
             room_types_dict = {rtype: len(cols) for rtype, cols in available_columns_by_type.items()}
@@ -877,9 +720,6 @@ class ExcelHandler:
                     logger.info("ℹ️  No 'room_config' sheet found, using defaults from config.py")
                 except Exception as e:
                     logger.warning(f"Could not read room_config sheet: {e}, using defaults")
-            elif self.excel_path and OPENPYXL_AVAILABLE:
-                try:
-                    wb = load_workbook(self.excel_path, read_only=True)
                     if "room_config" in wb.sheetnames:
                         ws = wb["room_config"]
                         # Read rows (skip header)
@@ -941,183 +781,6 @@ class ExcelHandler:
                 return max_guests
         
         return None
-    
-    def _get_room_types_excel(self) -> Dict[int, str]:
-        """
-        Get room type mapping from header rows (row 1 and row 2).
-        Dynamic approach: checks row 1 first (starting from column B), falls back to row 2 if needed.
-        Skips column A (which typically has property name) and column B in row 2 (which has "Total Rooms").
-        """
-        room_types = {}
-        try:
-            # Strategy: Check row 1 for room types starting from column B (skip column A)
-            # Also check row 2 as fallback, but skip "Total Rooms" in column B
-            # Check up to 30 columns to ensure we catch all rooms
-            max_col = max(self.worksheet.max_column + 1, 30)  # Check at least 30 columns
-            
-            # First, check row 2 column B to see if it says "Total Rooms" - this helps us identify the structure
-            try:
-                col_b_row2 = self.worksheet.cell(row=2, column=2).value
-                has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
-            except:
-                has_total_rooms_col = False
-            
-            # Start from column B (2) - skip column A which has property name
-            start_col = 2
-            # If column B in row 2 has "Total Rooms", room data starts from column C (3)
-            if has_total_rooms_col:
-                start_col = 3
-            
-            for col_idx in range(start_col, max_col):
-                try:
-                    # First, try row 1 (room type header)
-                    cell_row1 = self.worksheet.cell(row=1, column=col_idx)
-                    room_type = None
-                    
-                    if cell_row1.value:
-                        room_type = str(cell_row1.value).strip()
-                        # Skip if it's "Room X", "Total Rooms", "Date", or empty
-                        # But allow room types that contain "bedroom" or "villa" (like "Two Bedroom Villa")
-                        room_type_lower = room_type.lower()
-                        if (room_type_lower.startswith("room ") or 
-                            room_type_lower in ["", "total rooms", "date"]):
-                            room_type = None
-                        # Note: We now allow "bedroom" and "villa" in room type names
-                        # Only skip if it's clearly a generic label
-                    
-                    # If row 1 didn't have a valid room type, check row 2 (but skip "Total Rooms")
-                    if not room_type:
-                        cell_row2 = self.worksheet.cell(row=2, column=col_idx)
-                        if cell_row2.value:
-                            potential_type = str(cell_row2.value).strip()
-                            potential_lower = potential_type.lower()
-                            # If it's "Room X" format, we still want to include it as a room
-                            # but we'll use a generic name or check if there's data in the column
-                            if potential_lower.startswith("room "):
-                                # This is a room column, check if row 1 has a type or use generic
-                                if not cell_row1.value or str(cell_row1.value).strip() == "":
-                                    # No room type in row 1, use the room number as identifier
-                                    room_type = potential_type  # e.g., "Room 7", "Room 8"
-                                else:
-                                    # Row 1 has something, use it as room type
-                                    room_type = str(cell_row1.value).strip()
-                            elif potential_lower not in ["total rooms", "date"]:
-                                # Not "Room X" but also not a generic label, use it as room type
-                                room_type = potential_type
-                    
-                    # If we found a valid room type, add it
-                    if room_type and room_type:
-                        room_types[col_idx] = room_type
-                        logger.debug(f"Found room type '{room_type}' in column {col_idx}")
-                    
-                except Exception as e:
-                    # If we can't read more columns, we've reached the end
-                    logger.debug(f"Stopped reading room types at column {col_idx}: {e}")
-                    break
-            
-            # If no room types found, try a more aggressive search starting from column B
-            if not room_types:
-                logger.warning("No room types found with standard method, trying alternative approach...")
-                for col_idx in range(2, max_col):
-                    try:
-                        cell_row1 = self.worksheet.cell(row=1, column=col_idx)
-                        if cell_row1.value:
-                            val = str(cell_row1.value).strip()
-                            # Accept any non-empty value that's not a generic label
-                            # Allow room types with "bedroom" or "villa" in the name
-                            if (val and 
-                                not val.lower().startswith("room ") and
-                                val.lower() not in ["", "total rooms", "date"]):
-                                room_types[col_idx] = val
-                                logger.debug(f"Found room type '{val}' in column {col_idx} (alternative method)")
-                    except:
-                        break
-            
-            logger.info(f"Found {len(room_types)} room types: {list(room_types.values())}")
-            return room_types
-        except Exception as e:
-            logger.warning(f"Could not read room types from header: {e}")
-            return room_types
-    
-    def _check_availability_excel(self, row_num: int) -> Tuple[bool, Optional[str], int, Dict[str, int]]:
-        """Check availability in Excel file."""
-        # Get room types from header row
-        room_types = self._get_room_types_excel()
-        
-        available_count = 0
-        total_rooms = 0
-        room_type_counts = {}  # Track available rooms by type
-        
-        # More dynamic: only check columns that have room types defined
-        # This makes it resilient to sheet structure changes
-        checked_cols = set()
-        max_col = min(self.worksheet.max_column + 1, 30)  # Check up to 30 columns
-        
-        # Determine starting column - check if column B in row 2 has "Total Rooms"
-        try:
-            col_b_row2 = self.worksheet.cell(row=2, column=2).value
-            has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
-            start_col = 3 if has_total_rooms_col else 2
-        except:
-            start_col = 2
-        
-        for col_idx in range(start_col, max_col):
-            try:
-                # Check if this column has a room type defined
-                room_type = room_types.get(col_idx)
-                if not room_type:
-                    # Skip columns without room types
-                    continue
-                
-                # Avoid double-counting
-                if col_idx in checked_cols:
-                    continue
-                checked_cols.add(col_idx)
-                
-                # Check availability for this room
-                cell = self.worksheet.cell(row=row_num, column=col_idx)
-                total_rooms += 1
-                
-                # Blank or empty cell = available
-                # Numbers (1, 2, etc.) = occupied with that many guests
-                cell_value = cell.value
-                if cell_value is None or str(cell_value).strip() == '':
-                    available_count += 1
-                    room_type_counts[room_type] = room_type_counts.get(room_type, 0) + 1
-                    logger.debug(f"Column {col_idx} ({room_type}): Available")
-                else:
-                    logger.debug(f"Column {col_idx} ({room_type}): Occupied (value: {cell_value})")
-                    
-            except Exception as e:
-                # If we can't read more columns, we've reached the end
-                logger.debug(f"Stopped checking availability at column {col_idx}: {e}")
-                break
-        
-        if total_rooms == 0:
-            return False, "No rooms configured for that date.", 0, {}
-        
-        is_available = available_count > 0
-        
-        # Build status message with room types - be explicit about all available types
-        if available_count == 0:
-            status = "Sorry, rooms are sold out on that date."
-        else:
-            # Create a clear list of all available room types
-            room_type_parts = []
-            for rtype, count in sorted(room_type_counts.items()):
-                if count == 1:
-                    room_type_parts.append(f"1 {rtype} room")
-                else:
-                    room_type_parts.append(f"{count} {rtype} rooms")
-            
-            room_type_list = ", ".join(room_type_parts)
-            
-            if available_count == 1:
-                status = f"Limited availability on that date. Available: {room_type_list}."
-            else:
-                status = f"Rooms are available on that date. Available: {room_type_list}."
-        
-        return is_available, status, available_count, room_type_counts
     
     def _get_room_types_google(self) -> Dict[int, str]:
         """
@@ -1404,118 +1067,9 @@ class ExcelHandler:
             
             logger.info(f"Updating booking for {len(dates_to_update)} dates: {dates_to_update}")
             
-            if self.use_google_sheets:
-                return self._update_booking_google(dates_to_update, num_rooms, num_guests, room_type_preference, booking_id, customer_name, phone_number)
-            else:
-                return self._update_booking_excel(dates_to_update, num_rooms, num_guests, room_type_preference, booking_id, customer_name, phone_number)
+            return self._update_booking_google(dates_to_update, num_rooms, num_guests, room_type_preference, booking_id, customer_name, phone_number)
         except Exception as e:
             logger.error(f"Error updating booking: {e}")
-            return False, f"Error updating booking: {str(e)}"
-    
-    def _update_booking_excel(self, dates: List[str], num_rooms: int, num_guests: int, room_type_preference: str = None, booking_id: str = None, customer_name: str = None, phone_number: str = None) -> Tuple[bool, str]:
-        """Update booking in Excel file."""
-        try:
-            # Calculate guests per room with proper distribution
-            # Distribute guests evenly, with remainder going to first rooms
-            if num_rooms > 0:
-                base_guests_per_room = num_guests // num_rooms
-                remainder = num_guests % num_rooms
-                # First 'remainder' rooms get base + 1, rest get base
-                guests_distribution = [base_guests_per_room + 1] * remainder + [base_guests_per_room] * (num_rooms - remainder)
-            else:
-                guests_distribution = [num_guests]
-            
-            logger.info(f"Booking {num_rooms} room(s) with {num_guests} total guests = Distribution: {guests_distribution}")
-            
-            # Get room types mapping
-            room_types = self._get_room_types_excel()
-            
-            # Determine starting column - check if column B in row 2 has "Total Rooms"
-            try:
-                col_b_row2 = self.worksheet.cell(row=2, column=2).value
-                has_total_rooms_col = col_b_row2 and "total" in str(col_b_row2).lower() and "room" in str(col_b_row2).lower()
-                start_col = 3 if has_total_rooms_col else 2
-            except:
-                start_col = 2
-            
-            # If room type preference is specified, find matching columns
-            preferred_columns = []
-            if room_type_preference:
-                room_type_lower = room_type_preference.strip().lower()
-                for col_idx, room_type in room_types.items():
-                    room_type_str = str(room_type).lower()
-                    # Match room type (handle variations)
-                    if (room_type_lower in room_type_str or 
-                        room_type_str in room_type_lower or
-                        (room_type_lower == "double" and "double" in room_type_str) or
-                        (room_type_lower == "twin" and "twin" in room_type_str) or
-                        ("villa" in room_type_lower and "villa" in room_type_str)):
-                        preferred_columns.append(col_idx)
-                logger.info(f"Found {len(preferred_columns)} columns matching room type '{room_type_preference}': {preferred_columns}")
-            
-            # Track rooms booked per date
-            total_rooms_booked = 0
-            dates_updated = 0
-            
-            for date_str in dates:
-                row_num = self.find_date_row(date_str)
-                if row_num is None:
-                    logger.warning(f"Date row not found for {date_str}, skipping")
-                    continue
-                
-                rooms_booked_for_date = 0
-                
-                # If we have preferred columns, use those first
-                columns_to_check = preferred_columns if preferred_columns else sorted(room_types.keys())
-                
-                for col_idx in columns_to_check:
-                    if rooms_booked_for_date >= num_rooms:
-                        break
-                    
-                    # Only fill columns that have room types
-                    if col_idx not in room_types:
-                        continue
-                    
-                    cell = self.worksheet.cell(row=row_num, column=col_idx)
-                    
-                    # Only fill blank cells (never overwrite)
-                    if cell.value is None or str(cell.value).strip() == '':
-                        # Get guests for this specific room from distribution
-                        guests_for_this_room = guests_distribution[room_index] if room_index < len(guests_distribution) else base_guests_per_room
-                        
-                        cell.value = guests_for_this_room
-                        
-                        # Add comment with booking metadata if available (Excel supports comments)
-                        if booking_id:
-                            try:
-                                from openpyxl.comments import Comment
-                                comment_text = f"Booking ID: {booking_id}"
-                                if customer_name:
-                                    comment_text += f"\nCustomer: {customer_name}"
-                                if phone_number:
-                                    comment_text += f"\nPhone: {phone_number}"
-                                cell.comment = Comment(comment_text, "Booking System")
-                            except Exception as comment_error:
-                                logger.warning(f"Could not add comment to Excel cell: {comment_error}")
-                        
-                        rooms_booked_for_date += 1
-                        total_rooms_booked += 1
-                        room_index += 1  # Move to next room in distribution
-                        logger.info(f"Booked room in column {col_idx} ({room_types.get(col_idx)}) for date {date_str} with {guests_for_this_room} guests")
-                
-                if rooms_booked_for_date > 0:
-                    dates_updated += 1
-            
-            # Save the workbook
-            self.workbook.save(self.excel_path)
-            
-            expected_total = num_rooms * len(dates)
-            if total_rooms_booked < expected_total:
-                return False, f"Could only book {total_rooms_booked} out of {expected_total} requested room-days ({num_rooms} rooms × {len(dates)} nights). Updated {dates_updated} out of {len(dates)} dates."
-            
-            return True, f"Booking updated successfully. Booked {num_rooms} room(s) for {len(dates)} night(s)."
-        except Exception as e:
-            logger.error(f"Error updating Excel booking: {e}")
             return False, f"Error updating booking: {str(e)}"
     
     def _update_booking_google(self, dates: List[str], num_rooms: int, num_guests: int, room_type_preference: str = None, booking_id: str = None, customer_name: str = None, phone_number: str = None) -> Tuple[bool, str]:
@@ -2045,10 +1599,7 @@ class ExcelHandler:
             
             logger.info(f"Freeing up rooms for {len(dates_to_clear)} dates: {dates_to_clear}")
             
-            if self.use_google_sheets:
-                return self._free_up_rooms_google(dates_to_clear, num_rooms, room_type_preference, booking_id)
-            else:
-                return self._free_up_rooms_excel(dates_to_clear, num_rooms, room_type_preference, booking_id)
+            return self._free_up_rooms_google(dates_to_clear, num_rooms, room_type_preference, booking_id)
         except Exception as e:
             logger.error(f"Error freeing up rooms: {e}")
             return False, f"Error freeing up rooms: {str(e)}"
@@ -2231,8 +1782,3 @@ class ExcelHandler:
             logger.error(f"Error freeing up rooms in Google Sheet: {e}", exc_info=True)
             return False, f"Error freeing up rooms: {str(e)}"
     
-    def _free_up_rooms_excel(self, dates: List[str], num_rooms: int, room_type_preference: str = None, booking_id: str = None) -> Tuple[bool, str]:
-        """Free up rooms in Excel file by clearing cells."""
-        # Similar implementation for Excel - for now, return success as Excel is less commonly used
-        logger.warning("Freeing up rooms in Excel files is not yet implemented")
-        return True, "Excel room freeing not yet implemented"

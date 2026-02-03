@@ -88,3 +88,9 @@ CONTACT_PHONE_NUMBER = os.getenv("CONTACT_PHONE_NUMBER", "975-17892899").strip()
 # Bot Control Configuration
 # Set to False to globally disable bot (all messages will be handled by humans)
 BOT_ENABLED = os.getenv("BOT_ENABLED", "true").lower() == "true"
+
+# Persistent State Storage (Render free friendly)
+# These worksheets will be created automatically if missing.
+SESSIONS_SHEET = os.getenv("SESSIONS_SHEET", "sessions_state").strip()
+BOT_CONTROL_SHEET = os.getenv("BOT_CONTROL_SHEET", "bot_control_state").strip()
+

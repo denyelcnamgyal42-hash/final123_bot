@@ -45,13 +45,10 @@ try:
         )
         logger.info("✅ Google Sheets handler initialized successfully!")
     else:
-        logger.info(f"📄 Using local Excel file: {config.EXCEL_PATH}")
-        # Use local Excel file
-        excel_handler = ExcelHandler(
-            excel_path=config.EXCEL_PATH,
-            sheet_name=config.HOTELS_SHEET
+        raise ValueError(
+            "GOOGLE_SHEET_ID is required. This application only supports Google Sheets.\n"
+            "Please set GOOGLE_SHEET_ID in your environment variables or .env file."
         )
-        logger.info("✅ Excel handler initialized successfully!")
 except FileNotFoundError as e:
     logger.error(f"❌ File not found: {e}")
     logger.warning("Excel handler not available. Availability checking and booking updates will not work.")

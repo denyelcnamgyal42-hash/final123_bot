@@ -43,6 +43,18 @@ limiter = Limiter(
 )
 message_queue = Queue(maxsize=1000)
 
+# Add request logging for debugging
+@app.before_request
+def log_request_info():
+    """Log all incoming requests for debugging."""
+    logger.info(f"📥 Incoming {request.method} request to {request.path}")
+    if request.method == "POST" and request.is_json:
+        try:
+            data = request.get_json()
+            logger.info(f"   Request data: {data}")
+        except:
+            pass
+
 def validate_phone_number(phone_number: str) -> bool:
     """Validate WhatsApp phone number format."""
     cleaned = re.sub(r'\D', '', phone_number)
@@ -347,6 +359,130 @@ def test_webhook():
         "message": "If you can see this, the webhook endpoint is accessible!",
         "next_steps": "Configure this URL in Meta: https://your-service.onrender.com/webhook"
     }), 200
+
+@app.route("/demo", methods=["GET"])
+def demo_page():
+    """Serve the demo chat interface."""
+    try:
+        with open("demo_chat.html", "r", encoding="utf-8") as f:
+            return f.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
+    except FileNotFoundError:
+        return """
+        <html>
+            <body>
+                <h1>Demo Chat Interface Not Found</h1>
+                <p>Please ensure demo_chat.html exists in the project directory.</p>
+            </body>
+        </html>
+        """, 404
+
+@app.route("/api/demo/message", methods=["POST", "OPTIONS"])
+def demo_message():
+    """Handle demo messages from the web interface."""
+    logger.info(f"🎯 Demo message endpoint called - Method: {request.method}")
+    
+    # Handle CORS preflight
+    if request.method == "OPTIONS":
+        logger.info("✅ Handling CORS preflight request")
+        response = jsonify({})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
+        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
+        return response, 200
+    
+    logger.info(f"📨 Processing POST request to /api/demo/message")
+    try:
+        data = request.get_json()
+        if not data:
+            logger.error("❌ Demo message: No JSON data received")
+            return jsonify({"error": "Invalid request", "response": "I apologize, but I received an invalid request. Please try again."}), 400
+        
+        message = data.get("message", "").strip()
+        phone_number = data.get("phone_number", "demo_user_123")
+        customer_name = data.get("customer_name", "Demo User")
+        
+        if not message:
+            return jsonify({"error": "Message is required", "response": "Please enter a message."}), 400
+        
+        logger.info(f"📱 Demo message from {phone_number} ({customer_name}): {message}")
+        
+        # Check bot control status
+        try:
+            from bot_control import get_bot_control_manager
+            bot_control = get_bot_control_manager()
+            
+            # Check if bot should process this message
+            if not bot_control.should_use_bot(phone_number):
+                if not bot_control.is_bot_enabled():
+                    response_text = (
+                        "Hello! Our team is currently replying to messages manually. "
+                        "Please wait for a staff member to respond. Thank you for your patience! 😊"
+                    )
+                else:
+                    response_text = (
+                        "Hello! A staff member will respond to your message shortly. "
+                        "Thank you for your patience! 😊"
+                    )
+                logger.info(f"🤖 Bot disabled for {phone_number}, sending human mode message")
+                response = jsonify({"response": response_text})
+                response.headers.add("Access-Control-Allow-Origin", "*")
+                return response, 200
+        except Exception as e:
+            logger.warning(f"⚠️ Error checking bot control: {e}, continuing with agent processing")
+        
+        # Process with agent
+        if not langchain_agent:
+            error_msg = "Chatbot is initializing. Please try again in a moment."
+            logger.error("Agent module not available when processing demo message")
+            response = jsonify({"response": error_msg})
+            response.headers.add("Access-Control-Allow-Origin", "*")
+            return response, 200
+        
+        agent = langchain_agent.get_agent()
+        if agent is None:
+            error_msg = "Chatbot is initializing. Please try again in a moment."
+            logger.error("Agent not initialized when processing demo message")
+            response = jsonify({"response": error_msg})
+            response.headers.add("Access-Control-Allow-Origin", "*")
+            return response, 200
+        
+        logger.info(f"🤖 Processing demo message with agent...")
+        try:
+            response_text = agent.process_message(message, phone_number, customer_name)
+            logger.info(f"✅ Demo response sent to {phone_number}: {response_text[:100]}...")
+        except Exception as agent_error:
+            logger.error(f"❌ Agent processing error: {agent_error}", exc_info=True)
+            import traceback
+            logger.error(f"Agent error traceback: {traceback.format_exc()}")
+            # Return a more helpful error message
+            error_msg = f"I encountered an error processing your message. Error: {str(agent_error)}"
+            response = jsonify({"error": "Agent processing failed", "response": error_msg})
+            response.headers.add("Access-Control-Allow-Origin", "*")
+            return response, 500
+        
+        response = jsonify({"response": response_text})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        return response, 200
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing demo message: {e}", exc_info=True)
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        # Check for common error types
+        error_type = type(e).__name__
+        error_message = str(e)
+        
+        # Provide more specific error messages
+        if "OpenAI" in error_message or "API" in error_type:
+            user_msg = "I'm having trouble connecting to the AI service. This might be due to API limits or connectivity issues. Please try again in a moment."
+        elif "Google" in error_message or "Sheets" in error_message:
+            user_msg = "I'm having trouble accessing the booking system. Please try again in a moment."
+        else:
+            user_msg = f"I encountered an error: {error_type}. Please try again."
+        
+        response = jsonify({"error": "Internal server error", "response": user_msg, "error_type": error_type})
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        return response, 500
 
 @app.route("/send-test", methods=["POST"])
 def send_test_message():

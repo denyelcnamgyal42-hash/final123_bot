@@ -7,6 +7,9 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict, field
 import hashlib
 
+import config
+from state_store import GoogleSheetsKVStore, should_use_google_state
+
 @dataclass
 class Message:
     """Represents a single message in conversation history."""
@@ -135,24 +138,55 @@ class Session:
 class SessionManager:
     """Manages user sessions with persistence."""
     
-    def __init__(self, session_file: str = "sessions.json", ttl_hours: int = 48):
+    def __init__(
+        self,
+        session_file: str = "sessions.json",
+        ttl_hours: int = 48,
+        *,
+        flush_interval_seconds: int = 15,
+        flush_batch_size: int = 25,
+    ):
         """
         Initialize session manager.
         
         Args:
             session_file: Path to session storage file
             ttl_hours: Session time-to-live in hours
+            flush_interval_seconds: How often to flush dirty sessions to storage
+            flush_batch_size: Flush immediately when this many sessions are dirty
         """
         self.session_file = session_file
         self.ttl_hours = ttl_hours
         self.sessions: Dict[str, Session] = {}
         self.lock = threading.RLock()  # Thread-safe operations
+
+        self.flush_interval_seconds = flush_interval_seconds
+        self.flush_batch_size = flush_batch_size
+        self._dirty_sessions: set[str] = set()
+
+        self._use_google_state = should_use_google_state()
+        self._store: Optional[GoogleSheetsKVStore] = None
+        if self._use_google_state:
+            try:
+                self._store = GoogleSheetsKVStore(
+                    sheet_id=config.GOOGLE_SHEET_ID,
+                    credentials_path=config.GOOGLE_SHEETS_CREDENTIALS_PATH,
+                    worksheet_name=config.SESSIONS_SHEET,
+                )
+            except Exception as e:
+                print(f"⚠️ Failed to init Google Sheets session store: {e}. Falling back to local JSON.")
+                self._use_google_state = False
+                self._store = None
         
-        # Load existing sessions
-        self._load_sessions()
+        # Load existing sessions (only from local file; Sheets sessions are loaded on-demand)
+        if not self._use_google_state:
+            self._load_sessions()
         
         # Start cleanup scheduler
         self._start_cleanup_scheduler()
+
+        # Start periodic flush thread (Sheets and local both benefit from batching)
+        self._start_flush_scheduler()
     
     def _load_sessions(self):
         """Load sessions from storage file."""
@@ -181,6 +215,9 @@ class SessionManager:
     
     def _save_sessions(self):
         """Save sessions to storage file."""
+        if self._use_google_state:
+            # When using Sheets, we persist via the flush scheduler / upsert calls.
+            return
         with self.lock:
             data = {phone: session.to_dict() for phone, session in self.sessions.items()}
         
@@ -193,6 +230,79 @@ class SessionManager:
             os.replace(temp_file, self.session_file)
         except Exception as e:
             print(f"Error saving sessions: {e}")
+
+    def _load_session_from_store(self, phone_number: str) -> Optional[Session]:
+        """Load a single session from Google Sheets KV store (if enabled)."""
+        if not self._use_google_state or not self._store:
+            return None
+        try:
+            raw = self._store.get_json(phone_number)
+            if not raw:
+                return None
+            data = json.loads(raw)
+            session = Session.from_dict(data)
+            if not self._is_session_valid(session):
+                # Best effort cleanup
+                try:
+                    self._store.delete(phone_number)
+                except Exception:
+                    pass
+                return None
+            return session
+        except Exception as e:
+            print(f"Error loading session from Sheets for {phone_number}: {e}")
+            return None
+
+    def _flush_dirty_sessions(self) -> None:
+        """Flush dirty sessions to persistent storage (Google Sheets or local JSON)."""
+        # Snapshot dirty keys quickly
+        with self.lock:
+            if not self._dirty_sessions:
+                return
+            dirty = list(self._dirty_sessions)
+            self._dirty_sessions.clear()
+
+            # Build payload
+            payload: Dict[str, str] = {}
+            for phone in dirty:
+                session = self.sessions.get(phone)
+                if not session:
+                    continue
+                payload[phone] = json.dumps(session.to_dict(), default=str)
+
+        if not payload:
+            return
+
+        if self._use_google_state and self._store:
+            try:
+                self._store.set_many_json(payload)
+                return
+            except Exception as e:
+                # If flush fails, re-mark dirty for retry
+                print(f"⚠️ Error flushing sessions to Sheets: {e}")
+                with self.lock:
+                    self._dirty_sessions.update(payload.keys())
+                return
+
+        # Fallback: local file persistence
+        self._save_sessions()
+
+    def _start_flush_scheduler(self):
+        """Start background thread to periodically flush dirty sessions."""
+
+        def flush_job():
+            import time
+
+            while True:
+                time.sleep(self.flush_interval_seconds)
+                try:
+                    self._flush_dirty_sessions()
+                except Exception:
+                    # Never let the flush thread die
+                    pass
+
+        thread = threading.Thread(target=flush_job, daemon=True)
+        thread.start()
     
     def _is_session_valid(self, session: Session) -> bool:
         """Check if session is still within TTL."""
@@ -213,7 +323,8 @@ class SessionManager:
             
             if expired_count > 0:
                 self.sessions = valid_sessions
-                self._save_sessions()
+                if not self._use_google_state:
+                    self._save_sessions()
                 print(f"Cleaned up {expired_count} expired sessions")
     
     def _start_cleanup_scheduler(self):
@@ -239,11 +350,14 @@ class SessionManager:
         """
         with self.lock:
             if phone_number not in self.sessions:
-                # Create new session
-                session = Session(phone_number)
+                # Try to load from Sheets first (if enabled)
+                session = self._load_session_from_store(phone_number) if self._use_google_state else None
+                if session is None:
+                    session = Session(phone_number)
                 self.sessions[phone_number] = session
                 print(f"Created new session for {phone_number}")
-                self._save_sessions()
+                # Mark dirty for persistence (batched)
+                self._dirty_sessions.add(phone_number)
             else:
                 session = self.sessions[phone_number]
                 session.last_active = datetime.now()
@@ -255,7 +369,14 @@ class SessionManager:
         with self.lock:
             self.sessions[phone_number] = session
             session.last_active = datetime.now()
-            self._save_sessions()
+            self._dirty_sessions.add(phone_number)
+            # Flush quickly if we have a lot of dirty sessions queued
+            if len(self._dirty_sessions) >= self.flush_batch_size:
+                # Flush outside lock to avoid long blocking
+                pass
+
+        if len(getattr(self, "_dirty_sessions", set())) >= self.flush_batch_size:
+            self._flush_dirty_sessions()
     
     def add_message(self, phone_number: str, role: str, content: str):
         """Add message to session history and save."""
@@ -320,7 +441,14 @@ class SessionManager:
         with self.lock:
             if phone_number in self.sessions:
                 del self.sessions[phone_number]
-                self._save_sessions()
+                self._dirty_sessions.discard(phone_number)
+                if self._use_google_state and self._store:
+                    try:
+                        self._store.delete(phone_number)
+                    except Exception:
+                        pass
+                else:
+                    self._save_sessions()
                 return True
             return False
 

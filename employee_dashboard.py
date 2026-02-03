@@ -27,21 +27,21 @@ booking_manager = BookingManager()
 # Initialize Excel handler
 excel_handler = None
 try:
-    if config.GOOGLE_SHEET_ID:
-        excel_handler = ExcelHandler(
-            google_sheet_id=config.GOOGLE_SHEET_ID,
-            google_credentials_path=config.GOOGLE_SHEETS_CREDENTIALS_PATH,
-            sheet_name=config.HOTELS_SHEET
+    if not config.GOOGLE_SHEET_ID:
+        raise ValueError(
+            "GOOGLE_SHEET_ID is required. This application only supports Google Sheets.\n"
+            "Please set GOOGLE_SHEET_ID in your environment variables or .env file."
         )
-    else:
-        excel_handler = ExcelHandler(
-            excel_path=config.EXCEL_PATH,
-            sheet_name=config.HOTELS_SHEET
-        )
+    
+    excel_handler = ExcelHandler(
+        google_sheet_id=config.GOOGLE_SHEET_ID,
+        google_credentials_path=config.GOOGLE_SHEETS_CREDENTIALS_PATH,
+        sheet_name=config.HOTELS_SHEET
+    )
 except Exception as e:
-    logger.error(f"Failed to initialize Excel handler: {e}")
-    logger.warning("Excel handler not available. Booking approvals will not update the Excel sheet.")
-    logger.warning("Please configure either GOOGLE_SHEET_ID or ensure EXCEL_PATH points to a valid file.")
+    logger.error(f"Failed to initialize Google Sheets handler: {e}")
+    logger.warning("Google Sheets handler not available. Booking approvals will not update the sheet.")
+    logger.warning("Please configure GOOGLE_SHEET_ID and GOOGLE_SHEETS_CREDENTIALS_PATH.")
 
 
 def require_auth(f):
