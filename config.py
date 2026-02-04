@@ -37,10 +37,8 @@ if CREDENTIALS_JSON and not os.path.exists(GOOGLE_SHEETS_CREDENTIALS_PATH):
     except Exception as e:
         print(f"⚠️ Warning: Failed to create credentials.json from CREDENTIALS_JSON: {e}")
 
-# Excel Configuration (if not using Google Sheets)
-EXCEL_PATH = os.getenv("EXCEL_PATH", "hotel_availability.xlsx")
-
 # Sheet names (configurable for flexibility) - Hotel reservations only
+# Note: This application only supports Google Sheets. Excel support has been removed.
 HOTELS_SHEET = os.getenv("HOTELS_SHEET", "room_allocation")
 BOOKINGS_SHEET = os.getenv("BOOKINGS_SHEET", "bookings")
 

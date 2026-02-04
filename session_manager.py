@@ -1,6 +1,7 @@
 """Session management for conversation history and context."""
 import json
 import os
+import logging
 import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
@@ -9,6 +10,8 @@ import hashlib
 
 import config
 from state_store import GoogleSheetsKVStore, should_use_google_state
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Message:
@@ -174,7 +177,7 @@ class SessionManager:
                     worksheet_name=config.SESSIONS_SHEET,
                 )
             except Exception as e:
-                print(f"⚠️ Failed to init Google Sheets session store: {e}. Falling back to local JSON.")
+                logger.warning(f"⚠️ Failed to init Google Sheets session store: {e}. Falling back to local JSON.")
                 self._use_google_state = False
                 self._store = None
         
@@ -203,12 +206,12 @@ class SessionManager:
                             if self._is_session_valid(session):
                                 self.sessions[phone] = session
                         except Exception as e:
-                            print(f"Error loading session for {phone}: {e}")
+                            logger.warning(f"Error loading session for {phone}: {e}")
                             continue
                 
-                print(f"Loaded {len(self.sessions)} valid sessions from storage")
+                logger.info(f"Loaded {len(self.sessions)} valid sessions from storage")
             except Exception as e:
-                print(f"Error loading session file: {e}. Starting with empty sessions.")
+                logger.error(f"Error loading session file: {e}. Starting with empty sessions.")
                 self.sessions = {}
         else:
             self.sessions = {}
@@ -229,7 +232,7 @@ class SessionManager:
             
             os.replace(temp_file, self.session_file)
         except Exception as e:
-            print(f"Error saving sessions: {e}")
+            logger.error(f"Error saving sessions: {e}")
 
     def _load_session_from_store(self, phone_number: str) -> Optional[Session]:
         """Load a single session from Google Sheets KV store (if enabled)."""
@@ -250,7 +253,7 @@ class SessionManager:
                 return None
             return session
         except Exception as e:
-            print(f"Error loading session from Sheets for {phone_number}: {e}")
+            logger.error(f"Error loading session from Sheets for {phone_number}: {e}")
             return None
 
     def _flush_dirty_sessions(self) -> None:
@@ -279,7 +282,7 @@ class SessionManager:
                 return
             except Exception as e:
                 # If flush fails, re-mark dirty for retry
-                print(f"⚠️ Error flushing sessions to Sheets: {e}")
+                logger.warning(f"⚠️ Error flushing sessions to Sheets: {e}")
                 with self.lock:
                     self._dirty_sessions.update(payload.keys())
                 return
@@ -325,7 +328,7 @@ class SessionManager:
                 self.sessions = valid_sessions
                 if not self._use_google_state:
                     self._save_sessions()
-                print(f"Cleaned up {expired_count} expired sessions")
+                logger.info(f"Cleaned up {expired_count} expired sessions")
     
     def _start_cleanup_scheduler(self):
         """Start background thread for session cleanup."""
@@ -355,7 +358,7 @@ class SessionManager:
                 if session is None:
                     session = Session(phone_number)
                 self.sessions[phone_number] = session
-                print(f"Created new session for {phone_number}")
+                logger.debug(f"Created new session for {phone_number}")
                 # Mark dirty for persistence (batched)
                 self._dirty_sessions.add(phone_number)
             else:

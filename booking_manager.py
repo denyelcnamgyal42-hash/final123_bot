@@ -411,15 +411,15 @@ class BookingManager:
             room_type_lower = room_type_preference.strip().lower()
             max_guests_per_room = None
             
-            # Try to get max guests from Excel/Google Sheets config first
+            # Try to get max guests from Google Sheets config first
             try:
                 from langchain_tools import excel_handler
                 if excel_handler:
                     max_guests_per_room = excel_handler.get_max_guests_for_room_type(room_type_preference)
             except Exception as e:
-                logger.debug(f"Could not get max guests from Excel config: {e}")
+                logger.debug(f"Could not get max guests from Google Sheets config: {e}")
             
-            # Fallback to config.py defaults if not found in Excel
+            # Fallback to config.py defaults if not found in Google Sheets
             if max_guests_per_room is None:
                 if "two bedroom villa" in room_type_lower or "two-bedroom villa" in room_type_lower or "villa" in room_type_lower:
                     max_guests_per_room = config.TWO_BEDROOM_VILLA_MAX_GUEST

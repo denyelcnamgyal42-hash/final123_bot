@@ -3,7 +3,7 @@ import requests
 import config 
 import logging 
 import re 
-import time  # ADDED THIS IMPORT
+import time
 from datetime import datetime
 from threading import Thread 
 from queue import Queue 
@@ -14,29 +14,16 @@ try:
 except ImportError:
     langchain_agent = None
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-if langchain_agent is None:
-    logger.warning("WhatsApp agent module not available")
 from flask_limiter import Limiter 
 from flask_limiter.util import get_remote_address
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+if langchain_agent is None:
+    logger.warning("WhatsApp agent module not available")
 
-# Register dashboard routes to make them accessible on the same port (for Render deployment)
-# This allows the dashboard to be accessed via the main service URL: https://your-service.onrender.com/dashboard
-def register_dashboard_routes():
-    """Register employee dashboard routes with the main webhook app."""
-    try:
-        # Import dashboard app after it's created to avoid circular imports
-        # We'll register routes after both apps are initialized in main.py
-        pass  # Routes will be registered in main.py after initialization
-    except Exception as e:
-        logger.warning(f"⚠️ Could not register dashboard routes: {e}")
+app = Flask(__name__)
 
 limiter = Limiter(
     app=app, 
@@ -48,17 +35,12 @@ limiter = Limiter(
 )
 message_queue = Queue(maxsize=1000)
 
-# Add request logging for debugging
+# Request logging (only for webhook endpoint to reduce noise)
 @app.before_request
 def log_request_info():
-    """Log all incoming requests for debugging."""
-    logger.info(f"📥 Incoming {request.method} request to {request.path}")
-    if request.method == "POST" and request.is_json:
-        try:
-            data = request.get_json()
-            logger.info(f"   Request data: {data}")
-        except:
-            pass
+    """Log webhook requests for monitoring."""
+    if request.path == "/webhook":
+        logger.info(f"📥 Incoming {request.method} request to {request.path}")
 
 def validate_phone_number(phone_number: str) -> bool:
     """Validate WhatsApp phone number format."""
@@ -334,14 +316,7 @@ def root():
     return jsonify({
         "status": "online",
         "service": "Hotel Booking WhatsApp Chatbot",
-        "timestamp": datetime.now().isoformat(),
-        "endpoints": {
-            "webhook": "/webhook",
-            "webhook_info": "/webhook-info",
-            "dashboard": "/dashboard?token=hotel-staff-2024",
-            "health": "/health"
-        },
-        "message": "Service is running. Use /webhook-info to check webhook configuration."
+        "timestamp": datetime.now().isoformat()
     }), 200
 
 @app.route("/health", methods=["GET"])
@@ -354,203 +329,6 @@ def health_check():
         "agent_initialized": langchain_agent is not None and langchain_agent.get_agent() is not None
     }), 200
 
-@app.route("/test-webhook", methods=["GET", "POST"])
-def test_webhook():
-    """Test endpoint to verify webhook is accessible."""
-    return jsonify({
-        "status": "webhook_reachable",
-        "method": request.method,
-        "timestamp": datetime.now().isoformat(),
-        "message": "If you can see this, the webhook endpoint is accessible!",
-        "next_steps": "Configure this URL in Meta: https://your-service.onrender.com/webhook"
-    }), 200
-
-@app.route("/demo", methods=["GET"])
-def demo_page():
-    """Serve the demo chat interface."""
-    try:
-        with open("demo_chat.html", "r", encoding="utf-8") as f:
-            return f.read(), 200, {"Content-Type": "text/html; charset=utf-8"}
-    except FileNotFoundError:
-        return """
-        <html>
-            <body>
-                <h1>Demo Chat Interface Not Found</h1>
-                <p>Please ensure demo_chat.html exists in the project directory.</p>
-            </body>
-        </html>
-        """, 404
-
-@app.route("/api/demo/message", methods=["POST", "OPTIONS"])
-def demo_message():
-    """Handle demo messages from the web interface."""
-    logger.info(f"🎯 Demo message endpoint called - Method: {request.method}")
-    
-    # Handle CORS preflight
-    if request.method == "OPTIONS":
-        logger.info("✅ Handling CORS preflight request")
-        response = jsonify({})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add("Access-Control-Allow-Methods", "POST, OPTIONS")
-        response.headers.add("Access-Control-Allow-Headers", "Content-Type")
-        return response, 200
-    
-    logger.info(f"📨 Processing POST request to /api/demo/message")
-    try:
-        data = request.get_json()
-        if not data:
-            logger.error("❌ Demo message: No JSON data received")
-            return jsonify({"error": "Invalid request", "response": "I apologize, but I received an invalid request. Please try again."}), 400
-        
-        message = data.get("message", "").strip()
-        phone_number = data.get("phone_number", "demo_user_123")
-        customer_name = data.get("customer_name", "Demo User")
-        
-        if not message:
-            return jsonify({"error": "Message is required", "response": "Please enter a message."}), 400
-        
-        logger.info(f"📱 Demo message from {phone_number} ({customer_name}): {message}")
-        
-        # Check bot control status
-        try:
-            from bot_control import get_bot_control_manager
-            bot_control = get_bot_control_manager()
-            
-            # Check if bot should process this message
-            if not bot_control.should_use_bot(phone_number):
-                if not bot_control.is_bot_enabled():
-                    response_text = (
-                        "Hello! Our team is currently replying to messages manually. "
-                        "Please wait for a staff member to respond. Thank you for your patience! 😊"
-                    )
-                else:
-                    response_text = (
-                        "Hello! A staff member will respond to your message shortly. "
-                        "Thank you for your patience! 😊"
-                    )
-                logger.info(f"🤖 Bot disabled for {phone_number}, sending human mode message")
-                response = jsonify({"response": response_text})
-                response.headers.add("Access-Control-Allow-Origin", "*")
-                return response, 200
-        except Exception as e:
-            logger.warning(f"⚠️ Error checking bot control: {e}, continuing with agent processing")
-        
-        # Process with agent
-        if not langchain_agent:
-            error_msg = "Chatbot is initializing. Please try again in a moment."
-            logger.error("Agent module not available when processing demo message")
-            response = jsonify({"response": error_msg})
-            response.headers.add("Access-Control-Allow-Origin", "*")
-            return response, 200
-        
-        agent = langchain_agent.get_agent()
-        if agent is None:
-            error_msg = "Chatbot is initializing. Please try again in a moment."
-            logger.error("Agent not initialized when processing demo message")
-            response = jsonify({"response": error_msg})
-            response.headers.add("Access-Control-Allow-Origin", "*")
-            return response, 200
-        
-        logger.info(f"🤖 Processing demo message with agent...")
-        try:
-            response_text = agent.process_message(message, phone_number, customer_name)
-            logger.info(f"✅ Demo response sent to {phone_number}: {response_text[:100]}...")
-        except Exception as agent_error:
-            logger.error(f"❌ Agent processing error: {agent_error}", exc_info=True)
-            import traceback
-            logger.error(f"Agent error traceback: {traceback.format_exc()}")
-            # Return a more helpful error message
-            error_msg = f"I encountered an error processing your message. Error: {str(agent_error)}"
-            response = jsonify({"error": "Agent processing failed", "response": error_msg})
-            response.headers.add("Access-Control-Allow-Origin", "*")
-            return response, 500
-        
-        response = jsonify({"response": response_text})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        return response, 200
-        
-    except Exception as e:
-        logger.error(f"❌ Error processing demo message: {e}", exc_info=True)
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        # Check for common error types
-        error_type = type(e).__name__
-        error_message = str(e)
-        
-        # Provide more specific error messages
-        if "OpenAI" in error_message or "API" in error_type:
-            user_msg = "I'm having trouble connecting to the AI service. This might be due to API limits or connectivity issues. Please try again in a moment."
-        elif "Google" in error_message or "Sheets" in error_message:
-            user_msg = "I'm having trouble accessing the booking system. Please try again in a moment."
-        else:
-            user_msg = f"I encountered an error: {error_type}. Please try again."
-        
-        response = jsonify({"error": "Internal server error", "response": user_msg, "error_type": error_type})
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        return response, 500
-
-@app.route("/send-test", methods=["POST"])
-def send_test_message():
-    """Endpoint to test sending messages (for debugging)."""
-    try:
-        data = request.get_json()
-        phone = data.get("phone")
-        message = data.get("message")
-        
-        if not phone or not message:
-            return jsonify({"error": "Phone and message required"}), 400
-        
-        result = send_whatsapp_message(phone, message)
-        
-        if result:
-            return jsonify({"status": "sent", "result": result}), 200
-        else:
-            return jsonify({"error": "Failed to send"}), 500
-            
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route("/webhook-info", methods=["GET"])
-def webhook_info():
-    """Endpoint to check webhook configuration (for debugging)."""
-    host = request.host
-    # Handle Render's internal routing
-    if host.startswith("127.0.0.1") or host.startswith("10."):
-        # Try to get the actual Render URL from headers or use a placeholder
-        host = request.headers.get('Host', 'your-service.onrender.com')
-    
-    webhook_url = f"https://{host}/webhook"
-    
-    return jsonify({
-        "status": "webhook_info",
-        "webhook_url": webhook_url,
-        "verify_token_configured": bool(config.WHATSAPP_VERIFY_TOKEN),
-        "verify_token_length": len(config.WHATSAPP_VERIFY_TOKEN) if config.WHATSAPP_VERIFY_TOKEN else 0,
-        "verify_token_preview": f"{config.WHATSAPP_VERIFY_TOKEN[:4]}..." if config.WHATSAPP_VERIFY_TOKEN and len(config.WHATSAPP_VERIFY_TOKEN) > 4 else "Not set",
-        "phone_number_id_configured": bool(config.WHATSAPP_PHONE_NUMBER_ID),
-        "access_token_configured": bool(config.WHATSAPP_ACCESS_TOKEN),
-        "api_url": config.WHATSAPP_API_URL if config.WHATSAPP_API_URL else "Not configured",
-        "test_endpoints": {
-            "root": "/",
-            "webhook_get": "/webhook?hub.mode=subscribe&hub.verify_token=YOUR_TOKEN&hub.challenge=test123",
-            "webhook_post": "/webhook (POST - for incoming messages)",
-            "health": "/health"
-        },
-        "instructions": {
-            "step1": "Go to https://developers.facebook.com/apps → Your App → WhatsApp → Configuration",
-            "step2": f"In 'Webhook' section, set Callback URL to: {webhook_url}",
-            "step3": f"Set Verify Token to: {config.WHATSAPP_VERIFY_TOKEN}",
-            "step4": "Click 'Verify and Save' - you should see verification in logs",
-            "step5": "Subscribe to 'messages' field in Webhook fields section",
-            "step6": "Send a test message to your WhatsApp Business number",
-            "step7": "Check logs for '📥 Received POST to /webhook'"
-        },
-        "troubleshooting": {
-            "no_messages": "If no messages appear: 1) Check webhook is subscribed to 'messages', 2) Verify token matches exactly, 3) Check WhatsApp Business number is correct",
-            "forbidden_error": "If you see 'forbidden' when accessing /dashboard, add ?token=hotel-staff-2024 to the URL",
-            "verification_failed": "If webhook verification fails, check that WHATSAPP_VERIFY_TOKEN in Render matches exactly what you enter in Meta"
-        }
-    }), 200
 
 def cleanup():
     """Cleanup function for graceful shutdown."""
