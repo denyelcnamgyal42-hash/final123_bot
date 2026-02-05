@@ -328,7 +328,7 @@ def health_check():
         "queue_size": message_queue.qsize(),
         "agent_initialized": langchain_agent is not None and langchain_agent.get_agent() is not None
     }), 200
-
+# 
 @app.route("/privacy-policy", methods=["GET"])
 def privacy_policy():
     return """
