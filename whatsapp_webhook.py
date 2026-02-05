@@ -329,6 +329,44 @@ def health_check():
         "agent_initialized": langchain_agent is not None and langchain_agent.get_agent() is not None
     }), 200
 
+@app.route("/privacy-policy", methods=["GET"])
+def privacy_policy():
+    return """
+    <html>
+    <head><title>Privacy Policy</title></head>
+    <body style="font-family: Arial, sans-serif; max-width: 800px; margin: auto;">
+        <h1>Privacy Policy</h1>
+
+        <p>Cheten's Market ("we", "our", "us") operates a WhatsApp chatbot for customer communication.</p>
+
+        <h2>Information We Collect</h2>
+        <p>We may collect WhatsApp phone numbers, message content, and profile names when users contact us.</p>
+
+        <h2>How We Use Information</h2>
+        <ul>
+            <li>To respond to customer inquiries</li>
+            <li>To provide automated assistance</li>
+            <li>To improve our services</li>
+        </ul>
+
+        <h2>Data Sharing</h2>
+        <p>Messages are processed using WhatsApp Cloud API provided by Meta. We do not sell or rent personal data.</p>
+
+        <h2>Data Retention</h2>
+        <p>We retain data only as long as necessary to operate the service.</p>
+
+        <h2>User Rights</h2>
+        <p>Users may request data deletion by contacting us.</p>
+
+        <h2>Contact</h2>
+        <p>Email: support@chetensmarket.com</p>
+
+        <p>Last updated: February 2026</p>
+    </body>
+    </html>
+    """, 200
+
+
 
 def cleanup():
     """Cleanup function for graceful shutdown."""
